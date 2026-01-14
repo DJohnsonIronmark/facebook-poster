@@ -81,6 +81,13 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // Convert scheduled_for to UNIX timestamp (seconds) for Facebook API
+      const getUnixTimestamp = (): string => {
+        if (publish_now || !scheduled_for) return '';
+        const date = new Date(scheduled_for);
+        return Math.floor(date.getTime() / 1000).toString();
+      };
+
       // Trigger n8n webhook for immediate or same-day publishing
       const webhookPayload = {
         Facebook_Page_ID: facebook_page_id,
@@ -88,7 +95,7 @@ export async function POST(request: NextRequest) {
         Location_Number: body.location_number || '',
         Post_Content: post_content,
         Link_URL: link_url || '',
-        Scheduled_For: scheduled_for || '',
+        Scheduled_Publish_Time: getUnixTimestamp(),
         Publish_Immediately: publish_now ? 'true' : 'false',
       };
 
