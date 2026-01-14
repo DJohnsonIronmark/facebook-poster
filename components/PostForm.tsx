@@ -171,6 +171,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             publish_now: publishNow,
             media_type: mediaType !== 'text' ? mediaType : null,
             media_url: finalMediaUrl,
+            // Placeholder values
+            city: page.city || null,
+            base_url: page.base_url || null,
+            phone: page.phone || null,
           };
 
           const response = await fetch('/api/posts', {
@@ -261,6 +265,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           publish_now: false,
           media_type: row.media_type && row.media_type !== 'text' ? row.media_type : null,
           media_url: row.media_url || null,
+          // Placeholder values
+          city: page.city || null,
+          base_url: page.base_url || null,
+          phone: page.phone || null,
         };
 
         const response = await fetch('/api/posts', {
@@ -563,12 +571,33 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   onChange={(e) => setPostContent(e.target.value)}
                   rows={5}
                   className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
-                  placeholder="Write your post content here..."
+                  placeholder="Write your post content here... Use placeholders like {{CITY}} or {{FRANCHISENAME}} for dynamic content."
                   disabled={submitting}
                 />
-                <p className="mt-1 text-sm text-gray-500">
-                  {postContent.length} / 63,206 characters
-                </p>
+                <div className="mt-1 flex items-center justify-between">
+                  <p className="text-sm text-gray-500">
+                    {postContent.length} / 63,206 characters
+                  </p>
+                  <details className="text-sm">
+                    <summary className="text-blue-600 cursor-pointer hover:text-blue-800">
+                      Available placeholders
+                    </summary>
+                    <div className="absolute mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-10 text-gray-600">
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                        <code className="bg-gray-100 px-1 rounded">{'{{CITY}}'}</code>
+                        <span>City name</span>
+                        <code className="bg-gray-100 px-1 rounded">{'{{FRANCHISENAME}}'}</code>
+                        <span>Franchise name</span>
+                        <code className="bg-gray-100 px-1 rounded">{'{{LOCATION}}'}</code>
+                        <span>Location number</span>
+                        <code className="bg-gray-100 px-1 rounded">{'{{BASEURL}}'}</code>
+                        <span>Website URL</span>
+                        <code className="bg-gray-100 px-1 rounded">{'{{PHONE}}'}</code>
+                        <span>Phone number</span>
+                      </div>
+                    </div>
+                  </details>
+                </div>
               </div>
 
               {/* Media Type Selector */}

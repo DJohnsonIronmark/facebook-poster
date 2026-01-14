@@ -4,6 +4,26 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
+// Replace placeholders in text with actual values
+function replacePlaceholders(text: string, values: Record<string, string>): string {
+  if (!text) return text;
+
+  let result = text;
+  const placeholders: Record<string, string> = {
+    '{{CITY}}': values.city || '',
+    '{{FRANCHISENAME}}': values.franchise_name || '',
+    '{{LOCATION}}': values.location_number || '',
+    '{{BASEURL}}': values.base_url || '',
+    '{{PHONE}}': values.phone || '',
+  };
+
+  for (const [placeholder, value] of Object.entries(placeholders)) {
+    result = result.replace(new RegExp(placeholder, 'gi'), value);
+  }
+
+  return result;
+}
+
 // GET - Fetch all posts
 export async function GET() {
   try {
@@ -52,6 +72,9 @@ export async function POST(request: NextRequest) {
       publish_now,
       media_url,
       media_type,
+      city,
+      base_url,
+      phone,
     } = body;
 
     // Validate required fields
@@ -61,6 +84,19 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // Prepare placeholder values
+    const placeholderValues = {
+      city: city || '',
+      franchise_name: franchise_name || '',
+      location_number: body.location_number || '',
+      base_url: base_url || '',
+      phone: phone || '',
+    };
+
+    // Replace placeholders in content and link
+    const processedContent = replacePlaceholders(post_content, placeholderValues);
+    const processedLinkUrl = replacePlaceholders(link_url || '', placeholderValues);
 
     // Check if scheduled_for is today (same-day scheduling goes through webhook)
     const isScheduledForToday = () => {
@@ -95,8 +131,8 @@ export async function POST(request: NextRequest) {
         Facebook_Page_ID: facebook_page_id,
         FRANCHISENAME: franchise_name,
         Location_Number: body.location_number || '',
-        Post_Content: post_content,
-        Link_URL: link_url || '',
+        Post_Content: processedContent,
+        Link_URL: processedLinkUrl,
         Scheduled_Publish_Time: getUnixTimestamp(),
         Publish_Immediately: publish_now ? 'true' : 'false',
         Media_URL: media_url || '',
@@ -123,8 +159,8 @@ export async function POST(request: NextRequest) {
         facebook_page_id,
         franchise_name,
         location_number: body.location_number || null,
-        post_content,
-        link_url: link_url || null,
+        post_content: processedContent,
+        link_url: processedLinkUrl || null,
         scheduled_for: scheduled_for || null,
         status: publish_now ? 'published' : 'pending',
         published_at: publish_now ? new Date().toISOString() : null,
@@ -173,8 +209,8 @@ export async function POST(request: NextRequest) {
       facebook_page_id,
       franchise_name,
       location_number: body.location_number || null,
-      post_content,
-      link_url: link_url || null,
+      post_content: processedContent,
+      link_url: processedLinkUrl || null,
       scheduled_for: scheduled_for || null,
       status: 'pending',
       media_url: media_url || null,

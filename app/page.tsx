@@ -9,6 +9,9 @@ export interface FacebookPage {
   location_name: string;
   location_number: string | null;
   facebook_page_id: string;
+  city: string | null;
+  base_url: string | null;
+  phone: string | null;
 }
 
 export interface ScheduledPost {
