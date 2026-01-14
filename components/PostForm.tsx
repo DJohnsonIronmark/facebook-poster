@@ -11,6 +11,7 @@ interface PostFormProps {
 
 interface CSVRow {
   location_name: string;
+  location_number: string;
   post_content: string;
   link_url: string;
   scheduled_for: string;
@@ -107,13 +108,23 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       let failedRows: string[] = [];
 
       for (const row of csvData) {
-        // Find the page by location name
-        const page = pages.find(p =>
-          p.location_name.toLowerCase() === row.location_name.toLowerCase()
-        );
+        // Find the page by location_number first, then fall back to location_name
+        let page = null;
+
+        if (row.location_number && row.location_number.trim()) {
+          page = pages.find(p =>
+            p.location_number && p.location_number.toLowerCase() === row.location_number.toLowerCase()
+          );
+        }
+
+        if (!page && row.location_name && row.location_name.trim()) {
+          page = pages.find(p =>
+            p.location_name.toLowerCase() === row.location_name.toLowerCase()
+          );
+        }
 
         if (!page) {
-          failedRows.push(`${row.location_name} (page not found)`);
+          failedRows.push(`${row.location_number || row.location_name} (page not found)`);
           continue;
         }
 
@@ -198,12 +209,13 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
     const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
 
-    // Validate required headers
-    const requiredHeaders = ['location_name', 'post_content'];
-    for (const required of requiredHeaders) {
-      if (!headers.includes(required)) {
-        throw new Error(`Missing required column: ${required}`);
-      }
+    // Validate required headers - need either location_name or location_number, plus post_content
+    const hasLocationIdentifier = headers.includes('location_name') || headers.includes('location_number');
+    if (!hasLocationIdentifier) {
+      throw new Error('Missing required column: location_name or location_number');
+    }
+    if (!headers.includes('post_content')) {
+      throw new Error('Missing required column: post_content');
     }
 
     const rows: CSVRow[] = [];
@@ -220,13 +232,15 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         row[header] = values[index];
       });
 
-      if (!row.location_name || !row.post_content) {
+      // Need either location_name or location_number, plus post_content
+      if ((!row.location_name && !row.location_number) || !row.post_content) {
         console.warn(`Skipping row ${i + 1}: missing required fields`);
         continue;
       }
 
       rows.push({
-        location_name: row.location_name,
+        location_name: row.location_name || '',
+        location_number: row.location_number || '',
         post_content: row.post_content,
         link_url: row.link_url || '',
         scheduled_for: row.scheduled_for || '',
@@ -259,8 +273,9 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   };
 
   const downloadTemplate = () => {
-    const headers = ['location_name', 'post_content', 'link_url', 'scheduled_for'];
+    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for'];
     const exampleRow = [
+      '1234',
       'Home Instead San Diego',
       'Check out our latest blog post about senior care tips!',
       'https://example.com/blog/senior-care-tips',
@@ -354,7 +369,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const pageOptions = pages.map(p => ({
     id: p.id,
-    label: p.location_name,
+    label: p.location_number ? `${p.location_number} - ${p.location_name}` : p.location_name,
     subLabel: p.facebook_page_id,
   }));
 
@@ -592,7 +607,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                       <table className="min-w-full divide-y divide-gray-200">
                         <thead className="bg-gray-50 sticky top-0">
                           <tr>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location #</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location Name</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Content</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Scheduled</th>
                           </tr>
@@ -601,7 +617,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                           {csvData.map((row, index) => (
                             <tr key={index}>
                               <td className="px-4 py-2 text-sm text-gray-900 whitespace-nowrap">
-                                {row.location_name}
+                                {row.location_number || '-'}
+                              </td>
+                              <td className="px-4 py-2 text-sm text-gray-900 whitespace-nowrap">
+                                {row.location_name || '-'}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-600 max-w-xs truncate">
                                 {row.post_content}
@@ -659,11 +678,13 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               <div className="bg-gray-50 rounded-lg p-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-2">CSV Format Instructions</h4>
                 <ul className="text-sm text-gray-600 space-y-1">
-                  <li>• <strong>location_name</strong> (required): Must match a location in the database exactly</li>
+                  <li>• <strong>location_number</strong> (optional): Location number to match - takes priority over location_name</li>
+                  <li>• <strong>location_name</strong> (optional): Location name - used if location_number not provided</li>
                   <li>• <strong>post_content</strong> (required): The text content of your post</li>
                   <li>• <strong>link_url</strong> (optional): URL to include with the post</li>
                   <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
                 </ul>
+                <p className="text-sm text-gray-500 mt-2">Note: Either location_number or location_name is required for each row.</p>
               </div>
             </div>
           </>

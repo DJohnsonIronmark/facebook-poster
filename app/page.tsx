@@ -7,6 +7,7 @@ import PostList from '@/components/PostList';
 export interface FacebookPage {
   id: string;
   location_name: string;
+  location_number: string | null;
   facebook_page_id: string;
 }
 

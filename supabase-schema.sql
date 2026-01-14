@@ -2,19 +2,24 @@
 -- Stores the Facebook pages that can be posted to
 CREATE TABLE IF NOT EXISTS facebook_pages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  location_name TEXT NOT NULL,      -- Location name (e.g., "Home Instead San Diego")
-  facebook_page_id TEXT NOT NULL,   -- Facebook Page ID
+  location_name TEXT NOT NULL,       -- Location name (e.g., "Home Instead San Diego")
+  location_number TEXT,              -- Optional location number for matching (e.g., "1234")
+  facebook_page_id TEXT NOT NULL,    -- Facebook Page ID
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Index for faster lookups
 CREATE INDEX IF NOT EXISTS idx_facebook_pages_location ON facebook_pages(location_name);
+CREATE INDEX IF NOT EXISTS idx_facebook_pages_location_number ON facebook_pages(location_number);
 CREATE INDEX IF NOT EXISTS idx_facebook_pages_fb_id ON facebook_pages(facebook_page_id);
 
 -- Example: Insert pages
--- INSERT INTO facebook_pages (location_name, facebook_page_id) VALUES
---   ('Home Instead San Diego', '123456789'),
---   ('Home Instead Los Angeles', '987654321');
+-- INSERT INTO facebook_pages (location_name, location_number, facebook_page_id) VALUES
+--   ('Home Instead San Diego', '1234', '123456789'),
+--   ('Home Instead Los Angeles', '5678', '987654321');
+
+-- To add location_number column to existing table:
+-- ALTER TABLE facebook_pages ADD COLUMN location_number TEXT;
 
 -- Facebook Scheduled Posts table
 -- Stores posts that are scheduled or have been published
