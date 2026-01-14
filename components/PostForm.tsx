@@ -53,6 +53,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           const payload = {
             facebook_page_id: page.facebook_page_id,
             franchise_name: page.location_name,
+            location_number: page.location_number || null,
             post_content: postContent.trim(),
             link_url: linkUrl.trim() || null,
             scheduled_for: publishNow ? null : (scheduledFor || null),
@@ -131,6 +132,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         const payload = {
           facebook_page_id: page.facebook_page_id,
           franchise_name: page.location_name,
+          location_number: page.location_number || null,
           post_content: row.post_content,
           link_url: row.link_url || null,
           scheduled_for: parseScheduledDate(row.scheduled_for),

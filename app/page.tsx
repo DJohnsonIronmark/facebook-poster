@@ -15,6 +15,7 @@ export interface ScheduledPost {
   id: string;
   facebook_page_id: string;
   franchise_name: string;
+  location_number: string | null;
   post_content: string;
   link_url: string;
   scheduled_for: string | null;

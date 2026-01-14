@@ -96,6 +96,7 @@ export async function POST(request: NextRequest) {
       const postData = {
         facebook_page_id,
         franchise_name,
+        location_number: body.location_number || null,
         post_content,
         link_url: link_url || null,
         scheduled_for: null,
@@ -139,6 +140,7 @@ export async function POST(request: NextRequest) {
     const postData = {
       facebook_page_id,
       franchise_name,
+      location_number: body.location_number || null,
       post_content,
       link_url: link_url || null,
       scheduled_for: scheduled_for || null,

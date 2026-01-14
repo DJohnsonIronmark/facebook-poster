@@ -128,7 +128,9 @@ export default function PostList({
             {/* Header */}
             <div className="flex items-start justify-between mb-3">
               <div>
-                <h3 className="font-medium text-gray-900">{post.franchise_name}</h3>
+                <h3 className="font-medium text-gray-900">
+                  {post.location_number ? `${post.location_number} - ` : ''}{post.franchise_name}
+                </h3>
                 <p className="text-sm text-gray-500">Page ID: {post.facebook_page_id}</p>
               </div>
               <div className="flex items-center gap-2">
