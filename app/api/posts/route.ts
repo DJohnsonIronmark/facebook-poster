@@ -60,8 +60,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // If publish_now is true, trigger n8n webhook directly
-    if (publish_now) {
+    // Check if scheduled_for is today (same-day scheduling goes through webhook)
+    const isScheduledForToday = () => {
+      if (!scheduled_for) return false;
+      const scheduledDate = new Date(scheduled_for);
+      const today = new Date();
+      return (
+        scheduledDate.getFullYear() === today.getFullYear() &&
+        scheduledDate.getMonth() === today.getMonth() &&
+        scheduledDate.getDate() === today.getDate()
+      );
+    };
+
+    // If publish_now is true OR scheduled for today, trigger n8n webhook directly
+    if (publish_now || isScheduledForToday()) {
       if (!N8N_WEBHOOK_URL) {
         return NextResponse.json(
           { error: 'n8n webhook URL not configured' },
@@ -69,12 +81,15 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Trigger n8n webhook for immediate publishing
+      // Trigger n8n webhook for immediate or same-day publishing
       const webhookPayload = {
         Facebook_Page_ID: facebook_page_id,
         FRANCHISENAME: franchise_name,
+        Location_Number: body.location_number || '',
         Post_Content: post_content,
         Link_URL: link_url || '',
+        Scheduled_For: scheduled_for || '',
+        Publish_Immediately: publish_now ? 'true' : 'false',
       };
 
       const webhookResponse = await fetch(N8N_WEBHOOK_URL, {
@@ -92,16 +107,17 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Save to Supabase as published
+      // Save to Supabase - status depends on whether it's immediate or same-day
+      const isSameDay = isScheduledForToday();
       const postData = {
         facebook_page_id,
         franchise_name,
         location_number: body.location_number || null,
         post_content,
         link_url: link_url || null,
-        scheduled_for: null,
-        status: 'published',
-        published_at: new Date().toISOString(),
+        scheduled_for: scheduled_for || null,
+        status: publish_now ? 'published' : 'pending',
+        published_at: publish_now ? new Date().toISOString() : null,
       };
 
       const response = await fetch(
@@ -121,17 +137,21 @@ export async function POST(request: NextRequest) {
       if (!response.ok) {
         const error = await response.text();
         console.error('Supabase error:', error);
-        // Post was published but not saved - still return success
+        // Post was sent to webhook but not saved - still return success
         return NextResponse.json({
           success: true,
-          message: 'Post published (but not saved to database)',
+          message: publish_now
+            ? 'Post published (but not saved to database)'
+            : 'Post sent to scheduler (but not saved to database)',
         });
       }
 
       const savedPost = await response.json();
       return NextResponse.json({
         success: true,
-        message: 'Post published successfully',
+        message: publish_now
+          ? 'Post published successfully'
+          : `Post scheduled for today and sent to publisher`,
         post: savedPost[0],
       });
     }
