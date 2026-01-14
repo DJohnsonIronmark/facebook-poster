@@ -50,6 +50,8 @@ export async function POST(request: NextRequest) {
       link_url,
       scheduled_for,
       publish_now,
+      media_url,
+      media_type,
     } = body;
 
     // Validate required fields
@@ -97,6 +99,8 @@ export async function POST(request: NextRequest) {
         Link_URL: link_url || '',
         Scheduled_Publish_Time: getUnixTimestamp(),
         Publish_Immediately: publish_now ? 'true' : 'false',
+        Media_URL: media_url || '',
+        Media_Type: media_type || '',
       };
 
       const webhookResponse = await fetch(N8N_WEBHOOK_URL, {
@@ -115,7 +119,6 @@ export async function POST(request: NextRequest) {
       }
 
       // Save to Supabase - status depends on whether it's immediate or same-day
-      const isSameDay = isScheduledForToday();
       const postData = {
         facebook_page_id,
         franchise_name,
@@ -125,6 +128,8 @@ export async function POST(request: NextRequest) {
         scheduled_for: scheduled_for || null,
         status: publish_now ? 'published' : 'pending',
         published_at: publish_now ? new Date().toISOString() : null,
+        media_url: media_url || null,
+        media_type: media_type || null,
       };
 
       const response = await fetch(
@@ -172,6 +177,8 @@ export async function POST(request: NextRequest) {
       link_url: link_url || null,
       scheduled_for: scheduled_for || null,
       status: 'pending',
+      media_url: media_url || null,
+      media_type: media_type || null,
     };
 
     const response = await fetch(

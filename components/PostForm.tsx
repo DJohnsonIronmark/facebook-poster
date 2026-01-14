@@ -15,6 +15,8 @@ interface CSVRow {
   post_content: string;
   link_url: string;
   scheduled_for: string;
+  media_type: string;
+  media_url: string;
 }
 
 export default function PostForm({ pages, onPostCreated }: PostFormProps) {
@@ -29,6 +31,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [activeMode, setActiveMode] = useState<'single' | 'bulk'>('single');
   const [csvData, setCsvData] = useState<CSVRow[]>([]);
   const [csvError, setCsvError] = useState<string | null>(null);
+  const [mediaType, setMediaType] = useState<'text' | 'photo' | 'video'>('text');
+  const [mediaUrl, setMediaUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedPages = pages.filter(p => selectedPageIds.includes(p.id));
@@ -55,9 +59,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             franchise_name: page.location_name,
             location_number: page.location_number || null,
             post_content: postContent.trim(),
-            link_url: linkUrl.trim() || null,
+            link_url: mediaType === 'text' ? (linkUrl.trim() || null) : null,
             scheduled_for: publishNow ? null : (scheduledFor || null),
             publish_now: publishNow,
+            media_type: mediaType !== 'text' ? mediaType : null,
+            media_url: mediaType !== 'text' ? (mediaUrl.trim() || null) : null,
           };
 
           const response = await fetch('/api/posts', {
@@ -87,6 +93,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       setScheduledFor('');
       setPublishNow(false);
       setSelectedPageIds([]);
+      setMediaType('text');
+      setMediaUrl('');
       onPostCreated();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -134,9 +142,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           franchise_name: page.location_name,
           location_number: page.location_number || null,
           post_content: row.post_content,
-          link_url: row.link_url || null,
+          link_url: (!row.media_type || row.media_type === 'text') ? (row.link_url || null) : null,
           scheduled_for: parseScheduledDate(row.scheduled_for),
           publish_now: false,
+          media_type: row.media_type && row.media_type !== 'text' ? row.media_type : null,
+          media_url: row.media_url || null,
         };
 
         const response = await fetch('/api/posts', {
@@ -246,6 +256,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         post_content: row.post_content,
         link_url: row.link_url || '',
         scheduled_for: row.scheduled_for || '',
+        media_type: row.media_type || '',
+        media_url: row.media_url || '',
       });
     }
 
@@ -275,18 +287,16 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   };
 
   const downloadTemplate = () => {
-    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for'];
-    const exampleRow = [
-      '1234',
-      'Home Instead San Diego',
-      'Check out our latest blog post about senior care tips!',
-      'https://example.com/blog/senior-care-tips',
-      '01/20/2025 10:00 AM'
+    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for', 'media_type', 'media_url'];
+    const exampleRows = [
+      ['1234', 'Home Instead San Diego', 'Check out our latest blog post!', 'https://example.com/blog', '01/20/2025 10:00 AM', '', ''],
+      ['5678', 'Home Instead Denver', 'Meet our Care Pro of the Month!', '', '01/20/2025 2:00 PM', 'photo', 'https://example.com/images/care-pro.jpg'],
+      ['9012', 'Home Instead Austin', 'Watch our new video about senior care', '', '01/21/2025 9:00 AM', 'video', 'https://example.com/videos/senior-care.mp4'],
     ];
 
     const csv = [
       headers.join(','),
-      exampleRow.map(v => `"${v}"`).join(','),
+      ...exampleRows.map(row => row.map(v => `"${v}"`).join(',')),
     ].join('\n');
 
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -447,21 +457,88 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 </p>
               </div>
 
-              {/* Link URL */}
+              {/* Media Type Selector */}
               <div>
-                <label htmlFor="link" className="block text-sm font-medium text-gray-700 mb-2">
-                  Link URL (optional)
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Post Type
                 </label>
-                <input
-                  type="url"
-                  id="link"
-                  value={linkUrl}
-                  onChange={(e) => setLinkUrl(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="https://example.com/article"
-                  disabled={submitting}
-                />
+                <div className="flex gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="mediaType"
+                      checked={mediaType === 'text'}
+                      onChange={() => { setMediaType('text'); setMediaUrl(''); }}
+                      className="w-4 h-4 text-blue-600"
+                      disabled={submitting}
+                    />
+                    <span className="text-sm text-gray-700">Text/Link</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="mediaType"
+                      checked={mediaType === 'photo'}
+                      onChange={() => { setMediaType('photo'); setLinkUrl(''); }}
+                      className="w-4 h-4 text-blue-600"
+                      disabled={submitting}
+                    />
+                    <span className="text-sm text-gray-700">Photo</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="mediaType"
+                      checked={mediaType === 'video'}
+                      onChange={() => { setMediaType('video'); setLinkUrl(''); }}
+                      className="w-4 h-4 text-blue-600"
+                      disabled={submitting}
+                    />
+                    <span className="text-sm text-gray-700">Video</span>
+                  </label>
+                </div>
               </div>
+
+              {/* Link URL - only shown for text posts */}
+              {mediaType === 'text' && (
+                <div>
+                  <label htmlFor="link" className="block text-sm font-medium text-gray-700 mb-2">
+                    Link URL (optional)
+                  </label>
+                  <input
+                    type="url"
+                    id="link"
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="https://example.com/article"
+                    disabled={submitting}
+                  />
+                </div>
+              )}
+
+              {/* Media URL - shown for photo/video posts */}
+              {mediaType !== 'text' && (
+                <div>
+                  <label htmlFor="mediaUrl" className="block text-sm font-medium text-gray-700 mb-2">
+                    {mediaType === 'photo' ? 'Photo URL' : 'Video URL'} (required)
+                  </label>
+                  <input
+                    type="url"
+                    id="mediaUrl"
+                    value={mediaUrl}
+                    onChange={(e) => setMediaUrl(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder={mediaType === 'photo' ? 'https://example.com/image.jpg' : 'https://example.com/video.mp4'}
+                    disabled={submitting}
+                  />
+                  <p className="mt-1 text-sm text-gray-500">
+                    {mediaType === 'photo'
+                      ? 'Enter a publicly accessible URL to your image (JPG, PNG, GIF)'
+                      : 'Enter a publicly accessible URL to your video (MP4 recommended)'}
+                  </p>
+                </div>
+              )}
 
               {/* Publish Options */}
               <div className="border-t pt-6">
@@ -527,9 +604,9 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               <div className="flex justify-end gap-3">
                 <button
                   type="submit"
-                  disabled={submitting || selectedPageIds.length === 0 || !postContent.trim()}
+                  disabled={submitting || selectedPageIds.length === 0 || !postContent.trim() || (mediaType !== 'text' && !mediaUrl.trim())}
                   className={`px-6 py-2 rounded-lg font-medium text-white ${
-                    submitting || selectedPageIds.length === 0 || !postContent.trim()
+                    submitting || selectedPageIds.length === 0 || !postContent.trim() || (mediaType !== 'text' && !mediaUrl.trim())
                       ? 'bg-gray-400 cursor-not-allowed'
                       : publishNow
                         ? 'bg-green-600 hover:bg-green-700'
@@ -612,6 +689,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location #</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location Name</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Content</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Scheduled</th>
                           </tr>
                         </thead>
@@ -626,6 +704,9 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-600 max-w-xs truncate">
                                 {row.post_content}
+                              </td>
+                              <td className="px-4 py-2 text-sm text-gray-500 whitespace-nowrap">
+                                {row.media_type || 'text'}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-500 whitespace-nowrap">
                                 {formatDateForDisplay(row.scheduled_for)}
@@ -683,8 +764,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <li>• <strong>location_number</strong> (optional): Location number to match - takes priority over location_name</li>
                   <li>• <strong>location_name</strong> (optional): Location name - used if location_number not provided</li>
                   <li>• <strong>post_content</strong> (required): The text content of your post</li>
-                  <li>• <strong>link_url</strong> (optional): URL to include with the post</li>
+                  <li>• <strong>link_url</strong> (optional): URL to include with text posts (ignored for photo/video)</li>
                   <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
+                  <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;</li>
+                  <li>• <strong>media_url</strong> (optional): Publicly accessible URL to photo or video file</li>
                 </ul>
                 <p className="text-sm text-gray-500 mt-2">Note: Either location_number or location_name is required for each row.</p>
               </div>
