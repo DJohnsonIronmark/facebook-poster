@@ -6,8 +6,8 @@ import PostList from '@/components/PostList';
 
 export interface FacebookPage {
   id: string;
-  name: string;
-  franchise_name: string;
+  location_name: string;
+  facebook_page_id: string;
 }
 
 export interface ScheduledPost {

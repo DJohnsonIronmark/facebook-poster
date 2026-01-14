@@ -1,16 +1,20 @@
 -- Facebook Pages table
 -- Stores the Facebook pages that can be posted to
 CREATE TABLE IF NOT EXISTS facebook_pages (
-  id TEXT PRIMARY KEY,  -- Facebook Page ID
-  name TEXT NOT NULL,   -- Page name from Facebook
-  franchise_name TEXT NOT NULL,  -- Friendly name (e.g., "Home Instead San Diego")
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  location_name TEXT NOT NULL,      -- Location name (e.g., "Home Instead San Diego")
+  facebook_page_id TEXT NOT NULL,   -- Facebook Page ID
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Example data (update with actual page IDs)
--- INSERT INTO facebook_pages (id, name, franchise_name) VALUES
---   ('123456789', 'Home Instead Senior Care', 'Home Instead San Diego'),
---   ('987654321', 'Home Instead Senior Care', 'Home Instead Los Angeles');
+-- Index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_facebook_pages_location ON facebook_pages(location_name);
+CREATE INDEX IF NOT EXISTS idx_facebook_pages_fb_id ON facebook_pages(facebook_page_id);
+
+-- Example: Insert pages
+-- INSERT INTO facebook_pages (location_name, facebook_page_id) VALUES
+--   ('Home Instead San Diego', '123456789'),
+--   ('Home Instead Los Angeles', '987654321');
 
 -- Facebook Scheduled Posts table
 -- Stores posts that are scheduled or have been published

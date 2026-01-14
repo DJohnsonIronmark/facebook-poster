@@ -7,7 +7,7 @@ export async function GET() {
   try {
     // Fetch Facebook pages from Supabase
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/facebook_pages?select=*&order=franchise_name.asc`,
+      `${SUPABASE_URL}/rest/v1/facebook_pages?select=*&order=location_name.asc`,
       {
         headers: {
           'apikey': SUPABASE_KEY,
