@@ -33,9 +33,92 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [csvError, setCsvError] = useState<string | null>(null);
   const [mediaType, setMediaType] = useState<'text' | 'photo' | 'video'>('text');
   const [mediaUrl, setMediaUrl] = useState('');
+  const [mediaInputMode, setMediaInputMode] = useState<'url' | 'file'>('file');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaFileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedPages = pages.filter(p => selectedPageIds.includes(p.id));
+
+  // Handle media file selection
+  const handleMediaFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type based on selected media type
+    const isPhoto = file.type.startsWith('image/');
+    const isVideo = file.type.startsWith('video/');
+
+    if (mediaType === 'photo' && !isPhoto) {
+      setError('Please select an image file (JPG, PNG, GIF, WEBP)');
+      return;
+    }
+    if (mediaType === 'video' && !isVideo) {
+      setError('Please select a video file (MP4, MOV, AVI, WMV)');
+      return;
+    }
+
+    setSelectedFile(file);
+    setUploadedUrl(null);
+    setError(null);
+
+    // Create preview for images
+    if (isPhoto) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setPreviewUrl(event.target?.result as string);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      setPreviewUrl(null);
+    }
+  };
+
+  // Upload file to Supabase Storage
+  const uploadFile = async (): Promise<string | null> => {
+    if (!selectedFile) return null;
+
+    setUploading(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to upload file');
+      }
+
+      setUploadedUrl(data.url);
+      return data.url;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload file');
+      return null;
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // Clear media selection
+  const clearMediaSelection = () => {
+    setSelectedFile(null);
+    setUploadedUrl(null);
+    setPreviewUrl(null);
+    setMediaUrl('');
+    if (mediaFileInputRef.current) {
+      mediaFileInputRef.current.value = '';
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,6 +134,30 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         throw new Error('Please enter post content');
       }
 
+      // Determine the media URL to use
+      let finalMediaUrl: string | null = null;
+      if (mediaType !== 'text') {
+        if (mediaInputMode === 'file') {
+          if (selectedFile && !uploadedUrl) {
+            // Upload file first
+            finalMediaUrl = await uploadFile();
+            if (!finalMediaUrl) {
+              throw new Error('Failed to upload media file');
+            }
+          } else if (uploadedUrl) {
+            finalMediaUrl = uploadedUrl;
+          } else {
+            throw new Error('Please select a media file');
+          }
+        } else {
+          // URL mode
+          if (!mediaUrl.trim()) {
+            throw new Error('Please enter a media URL');
+          }
+          finalMediaUrl = mediaUrl.trim();
+        }
+      }
+
       // Create a post for each selected page
       const results = await Promise.all(
         selectedPages.map(async (page) => {
@@ -63,7 +170,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             scheduled_for: publishNow ? null : (scheduledFor || null),
             publish_now: publishNow,
             media_type: mediaType !== 'text' ? mediaType : null,
-            media_url: mediaType !== 'text' ? (mediaUrl.trim() || null) : null,
+            media_url: finalMediaUrl,
           };
 
           const response = await fetch('/api/posts', {
@@ -95,6 +202,13 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       setSelectedPageIds([]);
       setMediaType('text');
       setMediaUrl('');
+      setMediaInputMode('file');
+      setSelectedFile(null);
+      setUploadedUrl(null);
+      setPreviewUrl(null);
+      if (mediaFileInputRef.current) {
+        mediaFileInputRef.current.value = '';
+      }
       onPostCreated();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -468,7 +582,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                       type="radio"
                       name="mediaType"
                       checked={mediaType === 'text'}
-                      onChange={() => { setMediaType('text'); setMediaUrl(''); }}
+                      onChange={() => { setMediaType('text'); clearMediaSelection(); }}
                       className="w-4 h-4 text-blue-600"
                       disabled={submitting}
                     />
@@ -479,7 +593,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                       type="radio"
                       name="mediaType"
                       checked={mediaType === 'photo'}
-                      onChange={() => { setMediaType('photo'); setLinkUrl(''); }}
+                      onChange={() => { setMediaType('photo'); setLinkUrl(''); clearMediaSelection(); }}
                       className="w-4 h-4 text-blue-600"
                       disabled={submitting}
                     />
@@ -490,7 +604,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                       type="radio"
                       name="mediaType"
                       checked={mediaType === 'video'}
-                      onChange={() => { setMediaType('video'); setLinkUrl(''); }}
+                      onChange={() => { setMediaType('video'); setLinkUrl(''); clearMediaSelection(); }}
                       className="w-4 h-4 text-blue-600"
                       disabled={submitting}
                     />
@@ -517,26 +631,146 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 </div>
               )}
 
-              {/* Media URL - shown for photo/video posts */}
+              {/* Media Input - shown for photo/video posts */}
               {mediaType !== 'text' && (
-                <div>
-                  <label htmlFor="mediaUrl" className="block text-sm font-medium text-gray-700 mb-2">
-                    {mediaType === 'photo' ? 'Photo URL' : 'Video URL'} (required)
-                  </label>
-                  <input
-                    type="url"
-                    id="mediaUrl"
-                    value={mediaUrl}
-                    onChange={(e) => setMediaUrl(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    placeholder={mediaType === 'photo' ? 'https://example.com/image.jpg' : 'https://example.com/video.mp4'}
-                    disabled={submitting}
-                  />
-                  <p className="mt-1 text-sm text-gray-500">
-                    {mediaType === 'photo'
-                      ? 'Enter a publicly accessible URL to your image (JPG, PNG, GIF)'
-                      : 'Enter a publicly accessible URL to your video (MP4 recommended)'}
-                  </p>
+                <div className="space-y-4">
+                  {/* Input Mode Toggle */}
+                  <div className="flex gap-4 border-b pb-3">
+                    <button
+                      type="button"
+                      onClick={() => { setMediaInputMode('file'); clearMediaSelection(); }}
+                      className={`text-sm font-medium pb-1 border-b-2 ${
+                        mediaInputMode === 'file'
+                          ? 'border-blue-500 text-blue-600'
+                          : 'border-transparent text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      Upload File
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setMediaInputMode('url'); clearMediaSelection(); }}
+                      className={`text-sm font-medium pb-1 border-b-2 ${
+                        mediaInputMode === 'url'
+                          ? 'border-blue-500 text-blue-600'
+                          : 'border-transparent text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      Enter URL
+                    </button>
+                  </div>
+
+                  {/* File Upload Mode */}
+                  {mediaInputMode === 'file' && (
+                    <div>
+                      {!selectedFile ? (
+                        <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-gray-400 transition-colors">
+                          <input
+                            ref={mediaFileInputRef}
+                            type="file"
+                            accept={mediaType === 'photo' ? 'image/*' : 'video/*'}
+                            onChange={handleMediaFileSelect}
+                            className="hidden"
+                            id="media-upload"
+                            disabled={submitting || uploading}
+                          />
+                          <label htmlFor="media-upload" className="cursor-pointer">
+                            <svg className="mx-auto h-12 w-12 text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              {mediaType === 'photo' ? (
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                              ) : (
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                              )}
+                            </svg>
+                            <p className="text-sm text-gray-600">
+                              <span className="text-blue-600 font-medium">Click to upload</span> or drag and drop
+                            </p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {mediaType === 'photo' ? 'JPG, PNG, GIF, WEBP up to 10MB' : 'MP4, MOV, AVI, WMV up to 100MB'}
+                            </p>
+                          </label>
+                        </div>
+                      ) : (
+                        <div className="border border-gray-200 rounded-lg p-4">
+                          <div className="flex items-start gap-4">
+                            {/* Preview */}
+                            {previewUrl && mediaType === 'photo' && (
+                              <img
+                                src={previewUrl}
+                                alt="Preview"
+                                className="w-24 h-24 object-cover rounded-lg"
+                              />
+                            )}
+                            {mediaType === 'video' && (
+                              <div className="w-24 h-24 bg-gray-100 rounded-lg flex items-center justify-center">
+                                <svg className="w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                </svg>
+                              </div>
+                            )}
+                            {/* File info */}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">{selectedFile.name}</p>
+                              <p className="text-sm text-gray-500">
+                                {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB
+                              </p>
+                              {uploadedUrl && (
+                                <p className="text-sm text-green-600 mt-1 flex items-center gap-1">
+                                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                                  </svg>
+                                  Uploaded
+                                </p>
+                              )}
+                              {uploading && (
+                                <p className="text-sm text-blue-600 mt-1 flex items-center gap-1">
+                                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                  </svg>
+                                  Uploading...
+                                </p>
+                              )}
+                            </div>
+                            {/* Remove button */}
+                            <button
+                              type="button"
+                              onClick={clearMediaSelection}
+                              className="text-gray-400 hover:text-gray-600"
+                              disabled={uploading}
+                            >
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* URL Input Mode */}
+                  {mediaInputMode === 'url' && (
+                    <div>
+                      <label htmlFor="mediaUrl" className="block text-sm font-medium text-gray-700 mb-2">
+                        {mediaType === 'photo' ? 'Photo URL' : 'Video URL'}
+                      </label>
+                      <input
+                        type="url"
+                        id="mediaUrl"
+                        value={mediaUrl}
+                        onChange={(e) => setMediaUrl(e.target.value)}
+                        className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder={mediaType === 'photo' ? 'https://example.com/image.jpg' : 'https://example.com/video.mp4'}
+                        disabled={submitting}
+                      />
+                      <p className="mt-1 text-sm text-gray-500">
+                        {mediaType === 'photo'
+                          ? 'Enter a publicly accessible URL to your image (JPG, PNG, GIF)'
+                          : 'Enter a publicly accessible URL to your video (MP4 recommended)'}
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -604,22 +838,34 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               <div className="flex justify-end gap-3">
                 <button
                   type="submit"
-                  disabled={submitting || selectedPageIds.length === 0 || !postContent.trim() || (mediaType !== 'text' && !mediaUrl.trim())}
+                  disabled={
+                    submitting ||
+                    uploading ||
+                    selectedPageIds.length === 0 ||
+                    !postContent.trim() ||
+                    (mediaType !== 'text' && mediaInputMode === 'file' && !selectedFile) ||
+                    (mediaType !== 'text' && mediaInputMode === 'url' && !mediaUrl.trim())
+                  }
                   className={`px-6 py-2 rounded-lg font-medium text-white ${
-                    submitting || selectedPageIds.length === 0 || !postContent.trim() || (mediaType !== 'text' && !mediaUrl.trim())
+                    submitting ||
+                    uploading ||
+                    selectedPageIds.length === 0 ||
+                    !postContent.trim() ||
+                    (mediaType !== 'text' && mediaInputMode === 'file' && !selectedFile) ||
+                    (mediaType !== 'text' && mediaInputMode === 'url' && !mediaUrl.trim())
                       ? 'bg-gray-400 cursor-not-allowed'
                       : publishNow
                         ? 'bg-green-600 hover:bg-green-700'
                         : 'bg-blue-600 hover:bg-blue-700'
                   }`}
                 >
-                  {submitting ? (
+                  {submitting || uploading ? (
                     <span className="flex items-center gap-2">
                       <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                       </svg>
-                      {publishNow ? 'Publishing...' : 'Saving...'}
+                      {uploading ? 'Uploading...' : publishNow ? 'Publishing...' : 'Saving...'}
                     </span>
                   ) : publishNow ? (
                     `Publish to ${selectedPageIds.length} Page${selectedPageIds.length !== 1 ? 's' : ''}`
