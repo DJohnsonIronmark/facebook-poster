@@ -122,7 +122,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           franchise_name: page.location_name,
           post_content: row.post_content,
           link_url: row.link_url || null,
-          scheduled_for: row.scheduled_for || null,
+          scheduled_for: parseScheduledDate(row.scheduled_for),
           publish_now: false,
         };
 
@@ -264,7 +264,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       'Home Instead San Diego',
       'Check out our latest blog post about senior care tips!',
       'https://example.com/blog/senior-care-tips',
-      '2025-01-20T10:00'
+      '01/20/2025 10:00 AM'
     ];
 
     const csv = [
@@ -281,6 +281,68 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  // Convert mm/dd/yyyy format to ISO format for database
+  const parseScheduledDate = (dateStr: string): string | null => {
+    if (!dateStr || !dateStr.trim()) return null;
+
+    // Try to parse mm/dd/yyyy or mm/dd/yyyy hh:mm AM/PM format
+    const dateTimeMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?)?$/i);
+
+    if (dateTimeMatch) {
+      const [, month, day, year, hours, minutes, ampm] = dateTimeMatch;
+      let hour = hours ? parseInt(hours, 10) : 9; // Default to 9 AM
+      const minute = minutes ? parseInt(minutes, 10) : 0;
+
+      // Convert to 24-hour format if AM/PM specified
+      if (ampm) {
+        if (ampm.toUpperCase() === 'PM' && hour !== 12) {
+          hour += 12;
+        } else if (ampm.toUpperCase() === 'AM' && hour === 12) {
+          hour = 0;
+        }
+      }
+
+      const date = new Date(
+        parseInt(year, 10),
+        parseInt(month, 10) - 1,
+        parseInt(day, 10),
+        hour,
+        minute
+      );
+
+      if (!isNaN(date.getTime())) {
+        return date.toISOString();
+      }
+    }
+
+    // Fallback: try ISO format
+    const isoDate = new Date(dateStr);
+    if (!isNaN(isoDate.getTime())) {
+      return isoDate.toISOString();
+    }
+
+    return null;
+  };
+
+  // Format ISO date to mm/dd/yyyy for display
+  const formatDateForDisplay = (dateStr: string): string => {
+    if (!dateStr) return 'Draft';
+
+    const parsed = parseScheduledDate(dateStr);
+    if (!parsed) return dateStr;
+
+    const date = new Date(parsed);
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const year = date.getFullYear();
+    const hours = date.getHours();
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const displayHour = hours % 12 || 12;
+
+    return `${month}/${day}/${year} ${displayHour}:${minutes} ${ampm}`;
   };
 
   // Get minimum datetime (now)
@@ -545,7 +607,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                                 {row.post_content}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-500 whitespace-nowrap">
-                                {row.scheduled_for || 'Draft'}
+                                {formatDateForDisplay(row.scheduled_for)}
                               </td>
                             </tr>
                           ))}
@@ -600,7 +662,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <li>• <strong>location_name</strong> (required): Must match a location in the database exactly</li>
                   <li>• <strong>post_content</strong> (required): The text content of your post</li>
                   <li>• <strong>link_url</strong> (optional): URL to include with the post</li>
-                  <li>• <strong>scheduled_for</strong> (optional): Date/time in format YYYY-MM-DDTHH:MM (e.g., 2025-01-20T10:00)</li>
+                  <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
                 </ul>
               </div>
             </div>
