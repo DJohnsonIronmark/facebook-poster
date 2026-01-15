@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAuth } from '@/lib/auth';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -21,11 +22,21 @@ function replacePlaceholders(text: string, values: Record<string, string>): stri
     result = result.replace(new RegExp(placeholder, 'gi'), value);
   }
 
+  // Fix URL duplication patterns (e.g., https://www.homeinsteadhttps://www.homeinstead.com/...)
+  // This handles cases where user types partial URL before {{BASEURL}} placeholder
+  result = result.replace(
+    /https?:\/\/[a-zA-Z0-9.-]*(https?:\/\/)/gi,
+    '$1'
+  );
+
   return result;
 }
 
 // GET - Fetch all posts
 export async function GET() {
+  const { error: authError } = await requireAuth();
+  if (authError) return authError;
+
   try {
     const response = await fetch(
       `${SUPABASE_URL}/rest/v1/facebook_scheduled_posts?select=*&order=created_at.desc`,
@@ -61,6 +72,9 @@ export async function GET() {
 
 // POST - Create a new post
 export async function POST(request: NextRequest) {
+  const { error: authError } = await requireAuth();
+  if (authError) return authError;
+
   try {
     const body = await request.json();
     const {
@@ -257,6 +271,9 @@ export async function POST(request: NextRequest) {
 
 // DELETE - Delete a post
 export async function DELETE(request: NextRequest) {
+  const { error: authError } = await requireAuth();
+  if (authError) return authError;
+
   try {
     const { searchParams } = new URL(request.url);
     const postId = searchParams.get('id');
