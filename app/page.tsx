@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import PostForm from '@/components/PostForm';
 import PostList from '@/components/PostList';
+import PostFilters, { FilterState } from '@/components/PostFilters';
 import { createClient } from '@/lib/supabase/client';
 
 export interface FacebookPage {
@@ -27,6 +28,7 @@ export interface ScheduledPost {
   status: 'pending' | 'published' | 'failed';
   created_at: string;
   published_at: string | null;
+  facebook_post_id: string | null;
 }
 
 export default function Home() {
@@ -34,6 +36,7 @@ export default function Home() {
   const [posts, setPosts] = useState<ScheduledPost[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'create' | 'scheduled' | 'published'>('create');
+  const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
   const router = useRouter();
   const supabase = createClient();
 
@@ -91,6 +94,44 @@ export default function Home() {
 
   const pendingPosts = posts.filter(p => p.status === 'pending');
   const publishedPosts = posts.filter(p => p.status === 'published');
+
+  // Apply filters to published posts
+  const filteredPublishedPosts = useMemo(() => {
+    return publishedPosts.filter(post => {
+      // Location filter
+      if (filters.location) {
+        const matchesLocation =
+          post.location_number === filters.location ||
+          post.franchise_name === filters.location;
+        if (!matchesLocation) return false;
+      }
+
+      // Date range filter (based on published_at)
+      if (filters.dateFrom && post.published_at) {
+        const publishedDate = new Date(post.published_at);
+        const fromDate = new Date(filters.dateFrom);
+        fromDate.setHours(0, 0, 0, 0);
+        if (publishedDate < fromDate) return false;
+      }
+
+      if (filters.dateTo && post.published_at) {
+        const publishedDate = new Date(post.published_at);
+        const toDate = new Date(filters.dateTo);
+        toDate.setHours(23, 59, 59, 999);
+        if (publishedDate > toDate) return false;
+      }
+
+      return true;
+    });
+  }, [publishedPosts, filters]);
+
+  // Get unique locations from published posts for filter dropdown
+  const publishedLocations = useMemo(() => {
+    return publishedPosts.map(p => ({
+      location_number: p.location_number,
+      franchise_name: p.franchise_name
+    }));
+  }, [publishedPosts]);
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -170,14 +211,27 @@ export default function Home() {
           />
         )}
         {activeTab === 'published' && (
-          <PostList
-            posts={publishedPosts}
-            loading={loading}
-            emptyMessage="No published posts yet"
-            showPublishButton={false}
-            onPostDeleted={handlePostDeleted}
-            onPostPublished={handlePostPublished}
-          />
+          <>
+            <PostFilters
+              locations={publishedLocations}
+              onFilterChange={setFilters}
+            />
+            <PostList
+              posts={filteredPublishedPosts}
+              loading={loading}
+              emptyMessage={filters.location || filters.dateFrom || filters.dateTo
+                ? "No posts match the current filters"
+                : "No published posts yet"}
+              showPublishButton={false}
+              onPostDeleted={handlePostDeleted}
+              onPostPublished={handlePostPublished}
+            />
+            {filteredPublishedPosts.length !== publishedPosts.length && (
+              <p className="text-sm text-gray-500 mt-2 text-center">
+                Showing {filteredPublishedPosts.length} of {publishedPosts.length} published posts
+              </p>
+            )}
+          </>
         )}
       </main>
     </div>

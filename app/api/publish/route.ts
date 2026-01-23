@@ -64,6 +64,10 @@ export async function POST(request: NextRequest) {
       FRANCHISENAME: post.franchise_name,
       Post_Content: post.post_content,
       Link_URL: post.link_url || '',
+      Publish_Immediately: 'true',  // Must be string for n8n Switch node
+      Media_URL: post.media_url || '',
+      Media_Type: post.media_type || '',
+      Post_ID: post.id,  // Internal post ID for updating facebook_post_id after publish
     };
 
     const webhookResponse = await fetch(N8N_WEBHOOK_URL, {

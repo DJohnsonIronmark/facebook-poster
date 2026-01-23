@@ -133,42 +133,7 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Convert scheduled_for to UNIX timestamp (seconds) for Facebook API
-      const getUnixTimestamp = (): string => {
-        if (publish_now || !scheduled_for) return '';
-        const date = new Date(scheduled_for);
-        return Math.floor(date.getTime() / 1000).toString();
-      };
-
-      // Trigger n8n webhook for immediate or same-day publishing
-      const webhookPayload = {
-        Facebook_Page_ID: facebook_page_id,
-        FRANCHISENAME: franchise_name,
-        Location_Number: body.location_number || '',
-        Post_Content: processedContent,
-        Link_URL: processedLinkUrl,
-        Scheduled_Publish_Time: getUnixTimestamp(),
-        Publish_Immediately: publish_now ? 'true' : 'false',
-        Media_URL: media_url || '',
-        Media_Type: media_type || '',
-      };
-
-      const webhookResponse = await fetch(N8N_WEBHOOK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(webhookPayload),
-      });
-
-      if (!webhookResponse.ok) {
-        const error = await webhookResponse.text();
-        console.error('n8n webhook error:', error);
-        return NextResponse.json(
-          { error: 'Failed to publish post', details: error },
-          { status: 500 }
-        );
-      }
-
-      // Save to Supabase - status depends on whether it's immediate or same-day
+      // Save to Supabase FIRST to get the post ID
       const postData = {
         facebook_page_id,
         franchise_name,
@@ -199,16 +164,64 @@ export async function POST(request: NextRequest) {
       if (!response.ok) {
         const error = await response.text();
         console.error('Supabase error:', error);
-        // Post was sent to webhook but not saved - still return success
-        return NextResponse.json({
-          success: true,
-          message: publish_now
-            ? 'Post published (but not saved to database)'
-            : 'Post sent to scheduler (but not saved to database)',
-        });
+        return NextResponse.json(
+          { error: 'Failed to save post to database', details: error },
+          { status: 500 }
+        );
       }
 
       const savedPost = await response.json();
+      const postId = savedPost[0].id;
+
+      // Convert scheduled_for to UNIX timestamp (seconds) for Facebook API
+      const getUnixTimestamp = (): string => {
+        if (publish_now || !scheduled_for) return '';
+        const date = new Date(scheduled_for);
+        return Math.floor(date.getTime() / 1000).toString();
+      };
+
+      // Trigger n8n webhook for immediate or same-day publishing
+      const webhookPayload = {
+        Facebook_Page_ID: facebook_page_id,
+        FRANCHISENAME: franchise_name,
+        Location_Number: body.location_number || '',
+        Post_Content: processedContent,
+        Link_URL: processedLinkUrl,
+        Scheduled_Publish_Time: getUnixTimestamp(),
+        Publish_Immediately: publish_now ? 'true' : 'false',
+        Media_URL: media_url || '',
+        Media_Type: media_type || '',
+        Post_ID: postId,  // Internal post ID for updating facebook_post_id after publish
+      };
+
+      const webhookResponse = await fetch(N8N_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(webhookPayload),
+      });
+
+      if (!webhookResponse.ok) {
+        const error = await webhookResponse.text();
+        console.error('n8n webhook error:', error);
+        // Update post status to failed since webhook failed
+        await fetch(
+          `${SUPABASE_URL}/rest/v1/facebook_scheduled_posts?id=eq.${postId}`,
+          {
+            method: 'PATCH',
+            headers: {
+              'apikey': SUPABASE_KEY,
+              'Authorization': `Bearer ${SUPABASE_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ status: 'failed' }),
+          }
+        );
+        return NextResponse.json(
+          { error: 'Failed to publish post', details: error },
+          { status: 500 }
+        );
+      }
+
       return NextResponse.json({
         success: true,
         message: publish_now

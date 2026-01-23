@@ -38,10 +38,44 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [uploading, setUploading] = useState(false);
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isDraggingCSV, setIsDraggingCSV] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaFileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedPages = pages.filter(p => selectedPageIds.includes(p.id));
+
+  // Handle CSV drag and drop
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingCSV(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingCSV(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingCSV(false);
+
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      if (file.name.endsWith('.csv')) {
+        // Create a synthetic event to reuse handleFileUpload
+        const syntheticEvent = {
+          target: { files: [file] }
+        } as unknown as React.ChangeEvent<HTMLInputElement>;
+        handleFileUpload(syntheticEvent);
+      } else {
+        setCsvError('Please drop a CSV file');
+      }
+    }
+  };
 
   // Handle media file selection
   const handleMediaFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -335,13 +369,70 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   };
 
   const parseCSV = (text: string): CSVRow[] => {
-    const lines = text.split('\n').map(line => line.trim()).filter(line => line);
+    // Parse CSV properly handling multiline quoted fields
+    const records: string[][] = [];
+    let currentRecord: string[] = [];
+    let currentField = '';
+    let inQuotes = false;
 
-    if (lines.length < 2) {
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      const nextChar = text[i + 1];
+
+      if (inQuotes) {
+        if (char === '"') {
+          if (nextChar === '"') {
+            // Escaped quote
+            currentField += '"';
+            i++;
+          } else {
+            // End of quoted field
+            inQuotes = false;
+          }
+        } else {
+          currentField += char;
+        }
+      } else {
+        if (char === '"') {
+          inQuotes = true;
+        } else if (char === ',') {
+          currentRecord.push(currentField.trim());
+          currentField = '';
+        } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
+          if (char === '\r') i++; // Skip \n in \r\n
+          currentRecord.push(currentField.trim());
+          if (currentRecord.some(f => f)) { // Only add non-empty records
+            records.push(currentRecord);
+          }
+          currentRecord = [];
+          currentField = '';
+        } else if (char !== '\r') {
+          currentField += char;
+        }
+      }
+    }
+
+    // Don't forget the last field/record
+    if (currentField || currentRecord.length > 0) {
+      currentRecord.push(currentField.trim());
+      if (currentRecord.some(f => f)) {
+        records.push(currentRecord);
+      }
+    }
+
+    console.log('Parsed records count:', records.length);
+    console.log('Headers:', records[0]);
+    if (records.length > 1) {
+      console.log('First data row field count:', records[1].length);
+      console.log('First data row fields:', records[1].map((f, i) => `[${i}]: ${f.substring(0, 50)}...`));
+    }
+
+    if (records.length < 2) {
       throw new Error('CSV must have a header row and at least one data row');
     }
 
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
+    const headers = records[0].map(h => h.toLowerCase().replace(/"/g, ''));
+    console.log('Normalized headers:', headers);
 
     // Validate required headers - need either location_name or location_number, plus post_content
     const hasLocationIdentifier = headers.includes('location_name') || headers.includes('location_number');
@@ -353,11 +444,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     }
 
     const rows: CSVRow[] = [];
-    for (let i = 1; i < lines.length; i++) {
-      const values = parseCSVLine(lines[i]);
+    for (let i = 1; i < records.length; i++) {
+      const values = records[i];
 
       if (values.length !== headers.length) {
-        console.warn(`Skipping row ${i + 1}: column count mismatch`);
+        console.warn(`Skipping row ${i + 1}: column count mismatch (got ${values.length}, expected ${headers.length})`);
+        console.warn('Row values:', values);
         continue;
       }
 
@@ -368,7 +460,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
       // Need either location_name or location_number, plus post_content
       if ((!row.location_name && !row.location_number) || !row.post_content) {
-        console.warn(`Skipping row ${i + 1}: missing required fields`);
+        console.warn(`Skipping row ${i + 1}: missing required fields`, {
+          location_name: row.location_name,
+          location_number: row.location_number,
+          has_post_content: !!row.post_content
+        });
         continue;
       }
 
@@ -383,6 +479,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       });
     }
 
+    console.log('Final valid rows:', rows.length);
     return rows;
   };
 
@@ -926,7 +1023,16 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Upload CSV File
                 </label>
-                <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-gray-400 transition-colors">
+                <div
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
+                    isDraggingCSV
+                      ? 'border-blue-500 bg-blue-50'
+                      : 'border-gray-300 hover:border-gray-400'
+                  }`}
+                >
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -936,11 +1042,17 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     id="csv-upload"
                   />
                   <label htmlFor="csv-upload" className="cursor-pointer">
-                    <svg className="mx-auto h-12 w-12 text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className={`mx-auto h-12 w-12 mb-3 ${isDraggingCSV ? 'text-blue-500' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                     </svg>
                     <p className="text-sm text-gray-600">
-                      <span className="text-blue-600 font-medium">Click to upload</span> or drag and drop
+                      {isDraggingCSV ? (
+                        <span className="text-blue-600 font-medium">Drop your CSV file here</span>
+                      ) : (
+                        <>
+                          <span className="text-blue-600 font-medium">Click to upload</span> or drag and drop
+                        </>
+                      )}
                     </p>
                     <p className="text-xs text-gray-500 mt-1">CSV files only</p>
                   </label>

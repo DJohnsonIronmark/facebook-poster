@@ -33,10 +33,14 @@ CREATE TABLE IF NOT EXISTS facebook_scheduled_posts (
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'published', 'failed')),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   published_at TIMESTAMPTZ,
+  facebook_post_id TEXT,  -- Stores the Facebook post ID returned after publishing (for preview links)
 
   -- Optional: Add foreign key if you want referential integrity
   -- FOREIGN KEY (facebook_page_id) REFERENCES facebook_pages(id)
 );
+
+-- To add facebook_post_id column to existing table:
+-- ALTER TABLE facebook_scheduled_posts ADD COLUMN facebook_post_id TEXT;
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_scheduled_posts_status ON facebook_scheduled_posts(status);

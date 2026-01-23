@@ -2,6 +2,13 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
 export async function updateSession(request: NextRequest) {
+  // AUTH DISABLED FOR DEVELOPMENT - Remove this block to re-enable auth
+  const bypassAuth = true;
+  if (bypassAuth) {
+    return NextResponse.next({ request });
+  }
+  // END AUTH BYPASS
+
   let supabaseResponse = NextResponse.next({
     request,
   });
