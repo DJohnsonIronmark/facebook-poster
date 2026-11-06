@@ -15,7 +15,7 @@ async function resolveBatch(token: string) {
   const supabase = createServiceClient();
   const { data } = await supabase
     .from('fb_review_batches')
-    .select(`id, name, status, client_token_expires_at, client_approved_by, client_approved_at, client:fb_clients!client_id(name, internal_reviewer_emails, account_manager_email), posts:facebook_scheduled_posts!review_batch_id(${CLIENT_POST_COLUMNS})`)
+    .select(`id, name, status, created_by_email, client_token_expires_at, client_approved_by, client_approved_at, client:fb_clients!client_id(name, internal_reviewer_emails, account_manager_email), posts:facebook_scheduled_posts!review_batch_id(${CLIENT_POST_COLUMNS})`)
     .eq('client_token_hash', hashReviewToken(token))
     .maybeSingle();
   if (!data) return { supabase, batch: null };
@@ -119,6 +119,7 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
   await notifyClientApproved({
     to: batch.client?.internal_reviewer_emails || [],
     accountManager: batch.client?.account_manager_email,
+    cc: [batch.created_by_email],
     clientName: batch.client?.name || 'Client', batchName: batch.name, postCount: byId.size,
     editedCount: totalEdited, approvedBy: approver, baseUrl: appBaseUrl(request),
   });

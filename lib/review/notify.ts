@@ -78,9 +78,13 @@ async function graphToken(): Promise<string | null> {
 }
 
 async function sendEmail(opts: {
-  from: string | null | undefined; to: string[]; subject: string; html: string; replyTo?: string[];
+  from: string | null | undefined; to: string[]; subject: string; html: string; replyTo?: string[]; cc?: (string | null | undefined)[];
 }): Promise<EmailResult> {
   const { to, subject, html } = opts;
+  // CC: Ironmark addresses only, never someone already sending/receiving this message
+  const already = new Set([...to, opts.from || ''].map((e) => e.trim().toLowerCase()));
+  const cc = Array.from(new Set((opts.cc || []).filter(isAllowedSender).map((e) => e.trim().toLowerCase())))
+    .filter((e) => !already.has(e));
   if (to.length === 0) {
     console.warn(`[notify] no recipients for "${subject}"`);
     return 'skipped';
@@ -111,6 +115,7 @@ async function sendEmail(opts: {
           subject,
           body: { contentType: 'HTML', content: html },
           toRecipients: to.map(addr),
+          ...(cc.length ? { ccRecipients: cc.map(addr) } : {}),
           ...(opts.replyTo?.length ? { replyTo: opts.replyTo.map(addr) } : {}),
         },
         saveToSentItems: true,
@@ -150,6 +155,7 @@ export function notifyDraftsReady(opts: {
   return sendEmail({
     from: internalSender(opts.accountManager),
     to: opts.to,
+    cc: [opts.uploadedBy],  // implementation team member who uploaded the drafts
     subject: `Drafts ready for review: ${opts.clientName}`,
     html: layout('Facebook drafts ready for review', body, `${opts.baseUrl}/?tab=approvals`, 'Review drafts', 'Sent by the Ironmark Facebook Poster.'),
   });
@@ -158,6 +164,7 @@ export function notifyDraftsReady(opts: {
 /** Step 2: internal approval → email the client a review link, FROM their account manager */
 export function notifyClientReview(opts: {
   to: string[]; accountManager: string | null; clientName: string; postCount: number; reviewUrl: string; expiresAt: string;
+  cc?: (string | null | undefined)[];  // implementation team member(s) on the batch
 }): Promise<EmailResult> {
   const expires = new Date(opts.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   const body = `<p>Hi ${escapeHtml(opts.clientName)} team,</p>
@@ -166,6 +173,7 @@ export function notifyClientReview(opts: {
   return sendEmail({
     from: opts.accountManager,
     to: opts.to,
+    cc: opts.cc,
     subject: 'Please review your upcoming Facebook posts',
     html: layout('Your Facebook posts are ready for review', body, opts.reviewUrl, 'Review & approve posts', 'Sent via Ironmark.'),
   });
@@ -174,6 +182,7 @@ export function notifyClientReview(opts: {
 /** Step 3: client approved final form → email the internal team member(s) on the client */
 export function notifyClientApproved(opts: {
   to: string[]; accountManager?: string | null; clientName: string; batchName: string; postCount: number; editedCount: number; approvedBy: string; baseUrl: string;
+  cc?: (string | null | undefined)[];  // implementation team member(s) who will finalize + schedule
 }): Promise<EmailResult> {
   const body = `<p><strong>${escapeHtml(opts.clientName)}</strong> approved ${opts.postCount} post${opts.postCount === 1 ? '' : 's'} in ${escapeHtml(opts.batchName)}.</p>
   <p>${opts.editedCount} post${opts.editedCount === 1 ? ' was' : 's were'} edited by the client. Approved by: ${escapeHtml(opts.approvedBy)}</p>
@@ -181,6 +190,7 @@ export function notifyClientApproved(opts: {
   return sendEmail({
     from: internalSender(opts.accountManager),
     to: opts.to,
+    cc: opts.cc,
     subject: `Client approved: ${opts.clientName} Facebook posts`,
     html: layout('Client approved final posts', body, `${opts.baseUrl}/?tab=approvals`, 'Finalize & schedule', 'Sent by the Ironmark Facebook Poster.'),
   });
