@@ -140,6 +140,7 @@ export async function POST(request: NextRequest) {
 
     const email = await notifyDraftsReady({
       to: client.internal_reviewer_emails || [],
+      accountManager: client.account_manager_email,
       clientName: client.name, batchName: name, postCount: inserted.length, uploadedBy: user.email, baseUrl,
     });
     results.push({ batch_id: batch.id, client: client.name, posts: inserted.length, email });

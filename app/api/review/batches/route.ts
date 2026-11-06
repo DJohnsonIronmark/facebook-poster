@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
 
   let query = supabase
     .from('fb_review_batches')
-    .select(`${BATCH_PUBLIC_COLUMNS}, client:fb_clients!client_id(id, name, approval_workflow_enabled, internal_reviewer_emails, client_reviewer_emails), posts:facebook_scheduled_posts!review_batch_id(${POST_REVIEW_COLUMNS})`)
+    .select(`${BATCH_PUBLIC_COLUMNS}, client:fb_clients!client_id(id, name, approval_workflow_enabled, account_manager_email, internal_reviewer_emails, client_reviewer_emails), posts:facebook_scheduled_posts!review_batch_id(${POST_REVIEW_COLUMNS})`)
     .order('created_at', { ascending: false })
     .limit(200);
   query = includeAll

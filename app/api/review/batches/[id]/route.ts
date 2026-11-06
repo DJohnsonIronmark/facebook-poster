@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { generateReviewToken } from '@/lib/review/tokens';
-import { appBaseUrl, notifyClientReview } from '@/lib/review/notify';
+import { allowedSenderDomain, appBaseUrl, isAllowedSender, notifyClientReview } from '@/lib/review/notify';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { isScheduledForToday, sendScheduledPostToWebhook } from '@/lib/publisher';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
@@ -43,6 +43,9 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
   const now = new Date().toISOString();
   const posts: any[] = batch.posts || [];
   const recipients: string[] = batch.client?.client_reviewer_emails || [];
+  const senderProblem = isAllowedSender(batch.client?.account_manager_email)
+    ? null
+    : `Set an account manager (@${allowedSenderDomain()}) for this client under Client settings; client emails are sent from their mailbox.`;
 
   /** Atomically move the batch from one of `from` to `patch.status`; false if someone else got there first */
   const claim = async (from: string[], patch: Record<string, unknown>) => {
@@ -65,8 +68,8 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       .eq('status', 'client_review');
     if (upd.error) return null;
     const email = await notifyClientReview({
-      to: recipients, clientName: batch.client.name, postCount: posts.length, reviewUrl, expiresAt,
-      replyTo: batch.client.internal_reviewer_emails || [],
+      to: recipients, accountManager: batch.client.account_manager_email,
+      clientName: batch.client.name, postCount: posts.length, reviewUrl, expiresAt,
     });
     return { email, review_url: reviewUrl, expires_at: expiresAt };
   };
@@ -76,6 +79,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       if (batch.status !== 'internal_review') return err(`Batch is ${batch.status}, not awaiting internal review`, 409);
       if (posts.length === 0) return err('Batch has no posts');
       if (recipients.length === 0) return err('No client reviewer emails configured for this client. Add them under Client settings.');
+      if (senderProblem) return err(senderProblem);
 
       if (!(await claim(['internal_review'], { status: 'client_review', internal_approved_by_email: user.email, internal_approved_at: now }))) {
         return err('Someone else already moved this batch. Refresh and try again.', 409);
@@ -95,6 +99,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     case 'resend_link': {
       if (batch.status !== 'client_review') return err('Batch is not awaiting client review', 409);
       if (recipients.length === 0) return err('No client reviewer emails configured for this client.');
+      if (senderProblem) return err(senderProblem);
       const link = await issueLinkAndEmail();
       if (!link) return err('Failed to create a new link', 500);
       return NextResponse.json({ success: true, ...link });

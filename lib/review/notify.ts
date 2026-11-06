@@ -1,14 +1,19 @@
-// Email notifications. Transport, in order of preference:
-//   1. Google Apps Script web app (apps-script/notification-mailer.gs) — MailApp from the deploying
-//      Google account. Env: APPS_SCRIPT_MAIL_URL, APPS_SCRIPT_MAIL_SECRET, MAIL_SENDER_NAME (optional)
-//   2. Resend REST API. Env: RESEND_API_KEY, RESEND_FROM_EMAIL (optional)
-// If neither is configured, emails are skipped (logged) and the UI shows the review link to copy.
-// APP_BASE_URL (optional) overrides the request origin used in links.
+// Email notifications via Microsoft 365 (Microsoft Graph sendMail, app-only auth).
+//
+// Client-facing email is sent FROM the client's account manager (fb_clients.account_manager_email),
+// so it lands in their Sent Items and client replies go straight to them. Internal alerts are sent
+// from MS_NOTIFY_SENDER (a shared mailbox) when set, otherwise from the account manager.
+//
+// Env (server only):
+//   MS_GRAPH_TENANT_ID, MS_GRAPH_CLIENT_ID, MS_GRAPH_CLIENT_SECRET  Entra app with Mail.Send (application)
+//   MS_NOTIFY_SENDER          optional shared mailbox for internal alerts, e.g. social@ironmarkusa.com
+//   MS_ALLOWED_SENDER_DOMAIN  optional, default ironmarkusa.com — app refuses to send as anyone else
+//   APP_BASE_URL              optional; overrides request origin in links
+//
+// Mail.Send (application) can send as any mailbox in the tenant, so Exchange must scope the app
+// to the account managers + shared mailbox (RBAC for Applications / ApplicationAccessPolicy).
 
 export type EmailResult = 'sent' | 'skipped' | 'failed';
-
-const RESEND_FROM = process.env.RESEND_FROM_EMAIL || 'social@dashboard.ironmarkusa.com';
-const SENDER_NAME = process.env.MAIL_SENDER_NAME || 'Ironmark';
 
 export function escapeHtml(s: string): string {
   return s
@@ -31,115 +36,152 @@ export function validEmails(list: unknown): string[] {
     .filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
 }
 
-async function sendViaAppsScript(url: string, to: string[], subject: string, html: string, replyTo: string[]): Promise<EmailResult> {
-  const secret = process.env.APPS_SCRIPT_MAIL_SECRET;
-  if (!secret) {
-    console.error('[notify] APPS_SCRIPT_MAIL_URL set but APPS_SCRIPT_MAIL_SECRET missing');
-    return 'failed';
-  }
-  try {
-    // Apps Script answers POST with a 302 to script.googleusercontent.com; fetch follows it.
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret, to, subject, html, replyTo, senderName: SENDER_NAME }),
-      redirect: 'follow',
-      signal: AbortSignal.timeout(30000),
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.ok) {
-      console.error('[notify] Apps Script mailer error', res.status, data?.error);
-      return 'failed';
-    }
-    return 'sent';
-  } catch (err) {
-    console.error('[notify] Apps Script request failed', err);
-    return 'failed';
-  }
+export function allowedSenderDomain(): string {
+  return (process.env.MS_ALLOWED_SENDER_DOMAIN || 'ironmarkusa.com').toLowerCase();
 }
 
-async function sendEmail(to: string[], subject: string, html: string, replyTo: string[] = []): Promise<EmailResult> {
+/** A mailbox the app may send as: valid address on the allowed M365 domain. */
+export function isAllowedSender(email: string | null | undefined): email is string {
+  if (!email) return false;
+  const e = email.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) && e.endsWith(`@${allowedSenderDomain()}`);
+}
+
+// ---- Graph auth (client credentials), cached per server instance ----
+let cachedToken: { value: string; expiresAt: number } | null = null;
+
+async function graphToken(): Promise<string | null> {
+  const tenant = process.env.MS_GRAPH_TENANT_ID;
+  const clientId = process.env.MS_GRAPH_CLIENT_ID;
+  const secret = process.env.MS_GRAPH_CLIENT_SECRET;
+  if (!tenant || !clientId || !secret) return null;
+  if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) return cachedToken.value;
+
+  const res = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: secret,
+      scope: 'https://graph.microsoft.com/.default',
+      grant_type: 'client_credentials',
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) {
+    console.error('[notify] Graph token error', res.status, (await res.text()).slice(0, 300));
+    return null;
+  }
+  const data = await res.json();
+  cachedToken = { value: data.access_token, expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000 };
+  return cachedToken.value;
+}
+
+async function sendEmail(opts: {
+  from: string | null | undefined; to: string[]; subject: string; html: string; replyTo?: string[];
+}): Promise<EmailResult> {
+  const { to, subject, html } = opts;
   if (to.length === 0) {
     console.warn(`[notify] no recipients for "${subject}"`);
     return 'skipped';
   }
-  const scriptUrl = process.env.APPS_SCRIPT_MAIL_URL;
-  if (scriptUrl) return sendViaAppsScript(scriptUrl, to, subject, html, replyTo);
-
-  const key = process.env.RESEND_API_KEY;
-  if (!key) {
-    console.warn(`[notify] no email transport configured; email not sent: "${subject}"`);
+  if (!isAllowedSender(opts.from)) {
+    console.warn(`[notify] no allowed sender mailbox for "${subject}" (need an @${allowedSenderDomain()} address)`);
     return 'skipped';
   }
+  let token: string | null;
   try {
-    const res = await fetch('https://api.resend.com/emails', {
+    token = await graphToken();
+  } catch (err) {
+    console.error('[notify] Graph token request failed', err);
+    return 'failed';
+  }
+  if (!token) {
+    console.warn(`[notify] Microsoft Graph not configured; email not sent: "${subject}"`);
+    return 'skipped';
+  }
+
+  const addr = (address: string) => ({ emailAddress: { address } });
+  try {
+    const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(opts.from.trim().toLowerCase())}/sendMail`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        from: `${SENDER_NAME} <${RESEND_FROM}>`, to, subject, html,
-        ...(replyTo.length ? { reply_to: replyTo } : {}),
+        message: {
+          subject,
+          body: { contentType: 'HTML', content: html },
+          toRecipients: to.map(addr),
+          ...(opts.replyTo?.length ? { replyTo: opts.replyTo.map(addr) } : {}),
+        },
+        saveToSentItems: true,
       }),
+      signal: AbortSignal.timeout(20000),
     });
-    if (!res.ok) {
-      console.error('[notify] Resend error', res.status, await res.text());
+    if (res.status !== 202) {
+      if (res.status === 401) cachedToken = null;
+      console.error('[notify] Graph sendMail error', res.status, (await res.text()).slice(0, 300));
       return 'failed';
     }
     return 'sent';
   } catch (err) {
-    console.error('[notify] Resend request failed', err);
+    console.error('[notify] Graph sendMail request failed', err);
     return 'failed';
   }
 }
 
-function layout(heading: string, body: string, ctaUrl: string, ctaLabel: string): string {
+const internalSender = (accountManager?: string | null) =>
+  isAllowedSender(process.env.MS_NOTIFY_SENDER) ? process.env.MS_NOTIFY_SENDER! : accountManager;
+
+function layout(heading: string, body: string, ctaUrl: string, ctaLabel: string, footer: string): string {
   return `<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;color:#1c1e21">
   <h2 style="font-size:18px;margin:0 0 12px">${escapeHtml(heading)}</h2>
   ${body}
   <p style="margin:24px 0"><a href="${escapeHtml(ctaUrl)}" style="background:#1877f2;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-weight:600">${escapeHtml(ctaLabel)}</a></p>
-  <p style="font-size:12px;color:#65676b">Sent by the Ironmark Facebook Poster.</p>
+  <p style="font-size:12px;color:#65676b">${footer}</p>
 </div>`;
 }
 
 /** Step 1: drafts uploaded → alert the internal team member(s) on the client */
 export function notifyDraftsReady(opts: {
-  to: string[]; clientName: string; batchName: string; postCount: number; uploadedBy: string; baseUrl: string;
+  to: string[]; accountManager?: string | null; clientName: string; batchName: string; postCount: number; uploadedBy: string; baseUrl: string;
 }): Promise<EmailResult> {
   const body = `<p>${opts.postCount} drafted Facebook post${opts.postCount === 1 ? '' : 's'} for <strong>${escapeHtml(opts.clientName)}</strong> (${escapeHtml(opts.batchName)}) ${opts.postCount === 1 ? 'is' : 'are'} ready for internal review.</p>
   <p style="color:#65676b">Uploaded by ${escapeHtml(opts.uploadedBy)}</p>`;
-  return sendEmail(
-    opts.to,
-    `Drafts ready for review: ${opts.clientName}`,
-    layout('Facebook drafts ready for review', body, `${opts.baseUrl}/?tab=approvals`, 'Review drafts'),
-  );
+  return sendEmail({
+    from: internalSender(opts.accountManager),
+    to: opts.to,
+    subject: `Drafts ready for review: ${opts.clientName}`,
+    html: layout('Facebook drafts ready for review', body, `${opts.baseUrl}/?tab=approvals`, 'Review drafts', 'Sent by the Ironmark Facebook Poster.'),
+  });
 }
 
-/** Step 2: internal approval → email the client a review link */
+/** Step 2: internal approval → email the client a review link, FROM their account manager */
 export function notifyClientReview(opts: {
-  to: string[]; clientName: string; postCount: number; reviewUrl: string; expiresAt: string;
-  replyTo?: string[];  // internal team member(s), so client replies reach a person
+  to: string[]; accountManager: string | null; clientName: string; postCount: number; reviewUrl: string; expiresAt: string;
 }): Promise<EmailResult> {
   const expires = new Date(opts.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   const body = `<p>Hi ${escapeHtml(opts.clientName)} team,</p>
   <p>${opts.postCount} Facebook post${opts.postCount === 1 ? ' is' : 's are'} ready for your review. You'll see each post exactly as it will appear on Facebook, and you can edit the text directly before approving.</p>
-  <p style="color:#65676b">This private link expires ${escapeHtml(expires)}. No login required. Please don't forward it.</p>`;
-  return sendEmail(
-    opts.to,
-    `Please review your upcoming Facebook posts`,
-    layout('Your Facebook posts are ready for review', body, opts.reviewUrl, 'Review & approve posts'),
-    opts.replyTo || [],
-  );
+  <p style="color:#65676b">This private link expires ${escapeHtml(expires)}. No login required. Please don't forward it. Questions? Just reply to this email.</p>`;
+  return sendEmail({
+    from: opts.accountManager,
+    to: opts.to,
+    subject: 'Please review your upcoming Facebook posts',
+    html: layout('Your Facebook posts are ready for review', body, opts.reviewUrl, 'Review & approve posts', 'Sent via Ironmark.'),
+  });
 }
 
 /** Step 3: client approved final form → email the internal team member(s) on the client */
 export function notifyClientApproved(opts: {
-  to: string[]; clientName: string; batchName: string; postCount: number; editedCount: number; approvedBy: string; baseUrl: string;
+  to: string[]; accountManager?: string | null; clientName: string; batchName: string; postCount: number; editedCount: number; approvedBy: string; baseUrl: string;
 }): Promise<EmailResult> {
   const body = `<p><strong>${escapeHtml(opts.clientName)}</strong> approved ${opts.postCount} post${opts.postCount === 1 ? '' : 's'} in ${escapeHtml(opts.batchName)}.</p>
   <p>${opts.editedCount} post${opts.editedCount === 1 ? ' was' : 's were'} edited by the client. Approved by: ${escapeHtml(opts.approvedBy)}</p>
   <p>Next step: confirm final copy and schedule.</p>`;
-  return sendEmail(
-    opts.to,
-    `Client approved: ${opts.clientName} Facebook posts`,
-    layout('Client approved final posts', body, `${opts.baseUrl}/?tab=approvals`, 'Finalize & schedule'),
-  );
+  return sendEmail({
+    from: internalSender(opts.accountManager),
+    to: opts.to,
+    subject: `Client approved: ${opts.clientName} Facebook posts`,
+    html: layout('Client approved final posts', body, `${opts.baseUrl}/?tab=approvals`, 'Finalize & schedule', 'Sent by the Ironmark Facebook Poster.'),
+  });
 }

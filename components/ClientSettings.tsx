@@ -67,6 +67,7 @@ function ClientRow({ client, pages, onSaved, onError }: {
   client: FbClient; pages: PageRow[]; onSaved: (msg: string) => void; onError: (msg: string) => void;
 }) {
   const [enabled, setEnabled] = useState(client.approval_workflow_enabled);
+  const [accountManager, setAccountManager] = useState(client.account_manager_email || '');
   const [internal, setInternal] = useState(client.internal_reviewer_emails.join(', '));
   const [external, setExternal] = useState(client.client_reviewer_emails.join(', '));
   const [pageIds, setPageIds] = useState<string[]>(pages.filter((p) => p.client_id === client.id).map((p) => p.id));
@@ -78,6 +79,7 @@ function ClientRow({ client, pages, onSaved, onError }: {
     .map((p) => ({ id: p.id, label: p.location_number ? `${p.location_number} - ${p.location_name}` : p.location_name, subLabel: p.facebook_page_id }));
 
   const save = async () => {
+    if (enabled && !accountManager.trim()) { onError(`${client.name}: add the account manager before enabling (client emails are sent from their mailbox).`); return; }
     if (enabled && splitEmails(internal).length === 0) { onError(`${client.name}: add at least one internal team member email before enabling.`); return; }
     if (enabled && splitEmails(external).length === 0) { onError(`${client.name}: add at least one client reviewer email before enabling.`); return; }
     setSaving(true);
@@ -85,7 +87,7 @@ function ClientRow({ client, pages, onSaved, onError }: {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: client.id, approval_workflow_enabled: enabled,
+        id: client.id, approval_workflow_enabled: enabled, account_manager_email: accountManager.trim(),
         internal_reviewer_emails: splitEmails(internal), client_reviewer_emails: splitEmails(external), page_ids: pageIds,
       }),
     });
@@ -106,7 +108,12 @@ function ClientRow({ client, pages, onSaved, onError }: {
           </label>
         </div>
         <label className="block text-sm">
-          <span className="text-gray-600">Internal team member(s) on this client</span>
+          <span className="text-gray-600">Account manager (client emails are sent from this mailbox)</span>
+          <input value={accountManager} onChange={(e) => setAccountManager(e.target.value)} placeholder="am@ironmarkusa.com"
+            className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-1.5" />
+        </label>
+        <label className="block text-sm">
+          <span className="text-gray-600">Internal team member(s) on this client (get alerts)</span>
           <input value={internal} onChange={(e) => setInternal(e.target.value)} placeholder="name@ironmarkusa.com"
             className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-1.5" />
         </label>

@@ -13,6 +13,7 @@ export interface FbClient {
   id: string;
   name: string;
   approval_workflow_enabled: boolean;
+  account_manager_email: string | null;
   internal_reviewer_emails: string[];
   client_reviewer_emails: string[];
 }
