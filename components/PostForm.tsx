@@ -594,9 +594,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   };
 
   const downloadTemplate = () => {
-    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for', 'media_type', 'media_url'];
-    // Non-franchise example: blank location_number, matched on the exact page name.
-    // Dates are 95+ days out so a test upload can be reviewed and deleted long before it's due.
+    // 'notes' is for people reading the file; the importer ignores columns it doesn't know.
+    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for', 'media_type', 'media_url', 'notes'];
+    // One franchise example (matched on location_number) and non-franchise examples (blank
+    // location_number, matched on the exact page name). Dates are 95+ days out so a test upload
+    // can be reviewed and deleted long before it's due.
     const daysOut = (days: number, hour: number) => {
       const d = new Date();
       d.setDate(d.getDate() + days);
@@ -605,8 +607,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()} ${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
     };
     const exampleRows = [
-      ['', 'IANA', 'TEST POST, do not publish. Checking the approval workflow with a link post.', 'https://example.com', daysOut(95, 10), '', ''],
-      ['', 'IANA', 'TEST POST, do not publish. Checking the approval workflow with a text-only post.', '', daysOut(96, 14), '', ''],
+      ['0000', 'Home Instead Example City', 'Example franchise post for {{CITY}}. Call us at {{PHONE}}!', '{{BASEURL}}', daysOut(95, 9), '', '',
+        'FRANCHISE LOCATION EXAMPLE: put the location number in location_number (it takes priority over the name). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. Replace with a real location or delete this row before uploading.'],
+      ['', 'IANA', 'TEST POST, do not publish. Checking the approval workflow with a link post.', 'https://example.com', daysOut(95, 10), '', '',
+        'NON-FRANCHISE PAGE: leave location_number blank and put the page name exactly as shown on the Pages tab in location_name. Only use {{CITY}}/{{PHONE}}/{{BASEURL}} if those are filled in for the page.'],
+      ['', 'IANA', 'TEST POST, do not publish. Checking the approval workflow with a text-only post.', '', daysOut(96, 14), '', '',
+        'NON-FRANCHISE PAGE, text only: leave link_url, media_type and media_url blank.'],
     ];
 
     const csv = [
@@ -1326,6 +1332,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
                   <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;</li>
                   <li>• <strong>media_url</strong> (optional): Publicly accessible URL to photo or video file</li>
+                  <li>• <strong>notes</strong> (optional): Your own notes; ignored on upload</li>
                 </ul>
                 <p className="text-sm text-gray-500 mt-2">Note: Either location_number or location_name is required for each row.</p>
                 <p className="text-sm text-gray-500 mt-1">
