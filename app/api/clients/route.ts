@@ -31,7 +31,7 @@ export async function GET() {
   // Reviewer contact emails are only for people who run the workflow
   const canSeeEmails = role === 'admin' || role === 'manager';
   const out = (clients.data || []).map((c: any) =>
-    canSeeEmails ? c : { ...c, account_manager_email: null, internal_reviewer_emails: [], client_reviewer_emails: [] });
+    canSeeEmails ? c : { ...c, account_manager_email: null, client_reviewer_emails: [] });
   return NextResponse.json({ clients: out, pages: pages.data });
 }
 
@@ -58,7 +58,6 @@ export async function POST(request: NextRequest) {
       name,
       account_manager_email: accountManager ?? null,
       approval_workflow_enabled: !!body.approval_workflow_enabled,
-      internal_reviewer_emails: validEmails(body.internal_reviewer_emails),
       client_reviewer_emails: validEmails(body.client_reviewer_emails),
     })
     .select()
@@ -87,7 +86,6 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ error: `Account manager must be an @${allowedSenderDomain()} email` }, { status: 400 });
   }
   if (accountManager !== undefined) updates.account_manager_email = accountManager;
-  if (body.internal_reviewer_emails !== undefined) updates.internal_reviewer_emails = validEmails(body.internal_reviewer_emails);
   if (body.client_reviewer_emails !== undefined) updates.client_reviewer_emails = validEmails(body.client_reviewer_emails);
 
   const { data, error } = await supabase.from('fb_clients').update(updates).eq('id', id).select().single();

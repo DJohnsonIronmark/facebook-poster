@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { hashReviewToken, isWellFormedToken } from '@/lib/review/tokens';
-import { appBaseUrl, notifyClientApproved } from '@/lib/review/notify';
+import { appBaseUrl, notifyReadyToPost } from '@/lib/review/notify';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
 
 // PUBLIC (no login): the magic-link token is the credential. Everything is scoped to the
@@ -15,7 +15,7 @@ async function resolveBatch(token: string) {
   const supabase = createServiceClient();
   const { data } = await supabase
     .from('fb_review_batches')
-    .select(`id, name, status, created_by_email, client_token_expires_at, client_approved_by, client_approved_at, client:fb_clients!client_id(name, internal_reviewer_emails, account_manager_email), posts:facebook_scheduled_posts!review_batch_id(${CLIENT_POST_COLUMNS})`)
+    .select(`id, name, status, created_by_email, client_token_expires_at, client_approved_by, client_approved_at, client:fb_clients!client_id(name, client_reviewer_emails, account_manager_email), posts:facebook_scheduled_posts!review_batch_id(${CLIENT_POST_COLUMNS})`)
     .eq('client_token_hash', hashReviewToken(token))
     .maybeSingle();
   if (!data) return { supabase, batch: null };
@@ -111,17 +111,22 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
     .eq('review_batch_id', batch.id).eq('status', 'client_review');
   if (p.error) return NextResponse.json({ error: 'Failed to approve. Please try again.' }, { status: 500 });
 
-  // Count every post the client changed during this review (across earlier saves too)
-  const { data: clientEdits } = await supabase
-    .from('fb_post_revisions').select('post_id').eq('stage', 'client_edit').in('post_id', Array.from(byId.keys()));
-  const totalEdited = new Set((clientEdits || []).map((r: any) => r.post_id)).size;
+  // "Confirmed: ready to post" → client + account manager, cc the team member who uploaded.
+  // Re-read so the email lists the final (client-edited) copy.
+  const { data: finalPosts } = await supabase
+    .from('facebook_scheduled_posts')
+    .select('franchise_name, scheduled_for, post_content')
+    .eq('review_batch_id', batch.id)
+    .order('scheduled_for', { ascending: true, nullsFirst: false });
 
-  await notifyClientApproved({
-    to: batch.client?.internal_reviewer_emails || [],
+  const email = await notifyReadyToPost({
+    clientEmails: batch.client?.client_reviewer_emails || [],
     accountManager: batch.client?.account_manager_email,
-    cc: [batch.created_by_email],
-    clientName: batch.client?.name || 'Client', batchName: batch.name, postCount: byId.size,
-    editedCount: totalEdited, approvedBy: approver, baseUrl: appBaseUrl(request),
+    uploadedBy: batch.created_by_email,
+    clientName: batch.client?.name || 'Client',
+    approvedBy: approver,
+    reviewUrl: `${appBaseUrl(request)}/review/${params.token}`,
+    posts: finalPosts || [],
   });
-  return NextResponse.json({ success: true, approved: byId.size });
+  return NextResponse.json({ success: true, approved: byId.size, email });
 }

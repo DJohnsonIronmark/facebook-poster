@@ -146,18 +146,19 @@ function layout(heading: string, body: string, ctaUrl: string, ctaLabel: string,
 </div>`;
 }
 
-/** Step 1: drafts uploaded → alert the internal team member(s) on the client */
+/** Step 1: team member uploaded first drafts → account manager reviews (cc the uploader) */
 export function notifyDraftsReady(opts: {
-  to: string[]; accountManager?: string | null; clientName: string; batchName: string; postCount: number; uploadedBy: string; baseUrl: string;
+  accountManager: string | null; clientName: string; batchName: string; postCount: number; uploadedBy: string; baseUrl: string;
 }): Promise<EmailResult> {
-  const body = `<p>${opts.postCount} drafted Facebook post${opts.postCount === 1 ? '' : 's'} for <strong>${escapeHtml(opts.clientName)}</strong> (${escapeHtml(opts.batchName)}) ${opts.postCount === 1 ? 'is' : 'are'} ready for internal review.</p>
+  const body = `<p>${opts.postCount} first-draft Facebook post${opts.postCount === 1 ? '' : 's'} for <strong>${escapeHtml(opts.clientName)}</strong> (${escapeHtml(opts.batchName)}) ${opts.postCount === 1 ? 'is' : 'are'} ready for your review.</p>
+  <p>Review and edit as needed, then approve to send ${opts.postCount === 1 ? 'it' : 'them'} to the client.</p>
   <p style="color:#65676b">Uploaded by ${escapeHtml(opts.uploadedBy)}</p>`;
   return sendEmail({
     from: internalSender(opts.accountManager),
-    to: opts.to,
-    cc: [opts.uploadedBy],  // implementation team member who uploaded the drafts
-    subject: `Drafts ready for review: ${opts.clientName}`,
-    html: layout('Facebook drafts ready for review', body, `${opts.baseUrl}/?tab=approvals`, 'Review drafts', 'Sent by the Ironmark Facebook Poster.'),
+    to: isAllowedSender(opts.accountManager) ? [opts.accountManager] : [],
+    cc: [opts.uploadedBy],
+    subject: `Drafts ready for your review: ${opts.clientName}`,
+    html: layout('Facebook drafts ready for account manager review', body, `${opts.baseUrl}/?tab=approvals`, 'Review drafts', 'Sent by the Ironmark Facebook Poster.'),
   });
 }
 
@@ -179,19 +180,36 @@ export function notifyClientReview(opts: {
   });
 }
 
-/** Step 3: client approved final form → email the internal team member(s) on the client */
-export function notifyClientApproved(opts: {
-  to: string[]; accountManager?: string | null; clientName: string; batchName: string; postCount: number; editedCount: number; approvedBy: string; baseUrl: string;
-  cc?: (string | null | undefined)[];  // implementation team member(s) who will finalize + schedule
+/**
+ * Step 3: client approved → "Confirmed: ready to post" to the client AND the account manager,
+ * cc the internal team member (uploader), FROM the account manager. Client-facing wording.
+ */
+export function notifyReadyToPost(opts: {
+  clientEmails: string[]; accountManager: string | null; uploadedBy?: string | null;
+  clientName: string; approvedBy: string; reviewUrl?: string | null;
+  posts: { franchise_name: string; scheduled_for: string | null; post_content: string }[];
 }): Promise<EmailResult> {
-  const body = `<p><strong>${escapeHtml(opts.clientName)}</strong> approved ${opts.postCount} post${opts.postCount === 1 ? '' : 's'} in ${escapeHtml(opts.batchName)}.</p>
-  <p>${opts.editedCount} post${opts.editedCount === 1 ? ' was' : 's were'} edited by the client. Approved by: ${escapeHtml(opts.approvedBy)}</p>
-  <p>Next step: confirm final copy and schedule.</p>`;
+  const when = (d: string | null) =>
+    d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' }) : 'Date to be confirmed';
+  const rows = opts.posts.slice(0, 50).map((p) => {
+    const snippet = p.post_content.length > 90 ? `${p.post_content.slice(0, 90)}…` : p.post_content;
+    return `<tr><td style="padding:6px 8px;border-top:1px solid #e4e6eb;vertical-align:top">${escapeHtml(p.franchise_name)}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e4e6eb;vertical-align:top;white-space:nowrap">${escapeHtml(when(p.scheduled_for))}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e4e6eb;vertical-align:top;color:#65676b">${escapeHtml(snippet)}</td></tr>`;
+  }).join('');
+  const more = opts.posts.length > 50 ? `<p style="color:#65676b">…and ${opts.posts.length - 50} more.</p>` : '';
+  const body = `<p>Thanks! ${opts.posts.length} Facebook post${opts.posts.length === 1 ? ' is' : 's are'} approved by ${escapeHtml(opts.approvedBy)} and confirmed ready to post. Our team will schedule ${opts.posts.length === 1 ? 'it' : 'them'} for publication at the planned times.</p>
+  <table style="border-collapse:collapse;font-size:13px;width:100%"><thead><tr style="text-align:left;color:#65676b">
+    <th style="padding:6px 8px">Page</th><th style="padding:6px 8px">Planned</th><th style="padding:6px 8px">Post</th></tr></thead>
+    <tbody>${rows}</tbody></table>${more}`;
+  const html = opts.reviewUrl
+    ? layout('Confirmed: ready to post', body, opts.reviewUrl, 'View approved posts', 'Sent via Ironmark. Questions? Just reply to this email.')
+    : `<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;color:#1c1e21"><h2 style="font-size:18px;margin:0 0 12px">Confirmed: ready to post</h2>${body}</div>`;
   return sendEmail({
-    from: internalSender(opts.accountManager),
-    to: opts.to,
-    cc: opts.cc,
-    subject: `Client approved: ${opts.clientName} Facebook posts`,
-    html: layout('Client approved final posts', body, `${opts.baseUrl}/?tab=approvals`, 'Finalize & schedule', 'Sent by the Ironmark Facebook Poster.'),
+    from: opts.accountManager,
+    to: [...opts.clientEmails, ...(isAllowedSender(opts.accountManager) ? [opts.accountManager] : [])],
+    cc: [opts.uploadedBy],
+    subject: `Confirmed: your Facebook posts are ready to post`,
+    html,
   });
 }

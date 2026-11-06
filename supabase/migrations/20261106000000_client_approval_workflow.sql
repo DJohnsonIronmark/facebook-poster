@@ -8,8 +8,7 @@ CREATE TABLE IF NOT EXISTS public.fb_clients (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL UNIQUE,
   approval_workflow_enabled BOOLEAN NOT NULL DEFAULT false,
-  account_manager_email TEXT,                             -- M365 mailbox client-facing emails are sent from
-  internal_reviewer_emails TEXT[] NOT NULL DEFAULT '{}',  -- Ironmark team member(s) on the client
+  account_manager_email TEXT,                             -- reviews/approves drafts; client emails are sent from this M365 mailbox
   client_reviewer_emails TEXT[] NOT NULL DEFAULT '{}',    -- client-side approvers
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

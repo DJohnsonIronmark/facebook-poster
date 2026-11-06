@@ -10,9 +10,9 @@ import { downloadCSV, formatScheduledDate, parseCSVObjects, parseScheduledDate, 
 type Stage = 'internal_review' | 'client_review' | 'client_approved';
 
 const STAGES: { key: Stage; label: string; hint: string }[] = [
-  { key: 'internal_review', label: 'Internal review', hint: 'Drafts waiting on the Ironmark team' },
+  { key: 'internal_review', label: 'Account manager review', hint: 'First drafts waiting on the account manager' },
   { key: 'client_review', label: 'With client', hint: 'Client has the review link' },
-  { key: 'client_approved', label: 'Client approved', hint: 'Finalize copy and schedule' },
+  { key: 'client_approved', label: 'Ready to post', hint: 'Client approved: upload final posts and schedule' },
 ];
 
 const FINAL_HEADERS = ['post_id', 'client', 'location_number', 'location_name', 'post_content', 'link_url', 'media_url', 'scheduled_for', 'client_comment'];
@@ -20,10 +20,11 @@ const FINAL_HEADERS = ['post_id', 'client', 'location_number', 'location_name', 
 interface Props {
   canEdit: boolean;   // admin/manager
   isAdmin: boolean;
+  userEmail: string | null;
   onScheduled: () => void;
 }
 
-export default function ApprovalsTab({ canEdit, isAdmin, onScheduled }: Props) {
+export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled }: Props) {
   const [batches, setBatches] = useState<ReviewBatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [stage, setStage] = useState<Stage>('internal_review');
@@ -182,6 +183,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, onScheduled }: Props) {
             onToggle={() => setOpenId(openId === batch.id ? null : batch.id)}
             device={device}
             canEdit={canEdit}
+            canApproveForClient={isAdmin || (!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase())}
             onChanged={load}
             onAction={async (action) => {
               const data = await act(batch, action);
@@ -209,9 +211,9 @@ export default function ApprovalsTab({ canEdit, isAdmin, onScheduled }: Props) {
 // ---------------------------------------------------------------------------------------
 
 function BatchCard({
-  batch, open, onToggle, device, canEdit, onChanged, onAction,
+  batch, open, onToggle, device, canEdit, canApproveForClient, onChanged, onAction,
 }: {
-  batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean;
+  batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean; canApproveForClient: boolean;
   onChanged: () => void; onAction: (action: string) => Promise<void>;
 }) {
   const [confirm, setConfirm] = useState<string | null>(null);
@@ -267,11 +269,13 @@ function BatchCard({
               </>
             ) : (
               <>
-                {batch.status === 'internal_review' && (
+                {batch.status === 'internal_review' && (canApproveForClient ? (
                   <button onClick={() => setConfirm('approve_internal')} className="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">
                     Approve → send to client
                   </button>
-                )}
+                ) : (
+                  <span className="text-sm text-gray-500">Waiting on {batch.client?.account_manager_email || 'account manager'}</span>
+                ))}
                 {batch.status === 'client_review' && (
                   <button onClick={() => setConfirm('resend_link')} className="px-3 py-1.5 text-sm rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100">
                     Resend client link

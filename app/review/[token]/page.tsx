@@ -79,7 +79,7 @@ export default function ClientReviewPage({ params }: { params: { token: string }
       if (!res.ok) throw new Error(data.error || 'Something went wrong');
       setConfirming(false);
       await load();
-      setMessage({ kind: 'ok', text: action === 'approve' ? 'Thank you! Your posts are approved and your Ironmark team has been notified.' : 'Your changes are saved. You can come back to this link any time before it expires.' });
+      setMessage({ kind: 'ok', text: action === 'approve' ? 'Thank you! Your posts are approved. You\'ll receive a "ready to post" confirmation email, and your Ironmark team will schedule them.' : 'Your changes are saved. You can come back to this link any time before it expires.' });
     } catch (e) {
       setMessage({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong' });
     } finally {

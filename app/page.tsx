@@ -42,7 +42,7 @@ export default function Home() {
   const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
   const router = useRouter();
   const supabase = createClient();
-  const { role } = useAuth();
+  const { role, user } = useAuth();
 
   // Deep link from notification emails: /?tab=approvals
   useEffect(() => {
@@ -223,6 +223,7 @@ export default function Home() {
           <ApprovalsTab
             canEdit={role === 'admin' || role === 'manager'}
             isAdmin={role === 'admin'}
+            userEmail={user?.email ?? null}
             onScheduled={fetchPosts}
           />
         )}

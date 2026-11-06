@@ -76,7 +76,13 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
 
   switch (body.action) {
     case 'approve_internal': {
-      if (batch.status !== 'internal_review') return err(`Batch is ${batch.status}, not awaiting internal review`, 409);
+      if (batch.status !== 'internal_review') return err(`Batch is ${batch.status}, not awaiting account manager review`, 409);
+      // Account manager review: only the client's AM (or an admin) can approve first drafts
+      const isAccountManager = !!batch.client?.account_manager_email
+        && user.email.toLowerCase() === String(batch.client.account_manager_email).toLowerCase();
+      if (!isAccountManager && user.role !== 'admin') {
+        return err(`Only the account manager (${batch.client?.account_manager_email || 'not set'}) can approve these drafts for the client`, 403);
+      }
       if (posts.length === 0) return err('Batch has no posts');
       if (recipients.length === 0) return err('No client reviewer emails configured for this client. Add them under Client settings.');
       if (senderProblem) return err(senderProblem);
