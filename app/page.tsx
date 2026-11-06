@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation';
 import PostForm from '@/components/PostForm';
 import PostList from '@/components/PostList';
 import PostFilters, { FilterState } from '@/components/PostFilters';
+import ApprovalsTab from '@/components/ApprovalsTab';
 import { createClient } from '@/lib/supabase/client';
+import { useAuth } from '@/context/AuthContext';
 
 export interface FacebookPage {
   id: string;
@@ -15,6 +17,7 @@ export interface FacebookPage {
   city: string | null;
   base_url: string | null;
   phone: string | null;
+  client_id?: string | null;
 }
 
 export interface ScheduledPost {
@@ -25,7 +28,7 @@ export interface ScheduledPost {
   post_content: string;
   link_url: string;
   scheduled_for: string | null;
-  status: 'pending' | 'published' | 'failed';
+  status: 'pending' | 'published' | 'failed' | 'internal_review' | 'client_review' | 'client_approved';
   created_at: string;
   published_at: string | null;
   facebook_post_id: string | null;
@@ -35,10 +38,17 @@ export default function Home() {
   const [pages, setPages] = useState<FacebookPage[]>([]);
   const [posts, setPosts] = useState<ScheduledPost[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'create' | 'scheduled' | 'published'>('create');
+  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published'>('create');
   const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
   const router = useRouter();
   const supabase = createClient();
+  const { role } = useAuth();
+
+  // Deep link from notification emails: /?tab=approvals
+  useEffect(() => {
+    const tab = new URLSearchParams(window.location.search).get('tab');
+    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published') setActiveTab(tab);
+  }, []);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -77,9 +87,9 @@ export default function Home() {
     fetchPosts();
   }, [fetchPages, fetchPosts]);
 
-  const handlePostCreated = () => {
+  const handlePostCreated = (destination: 'scheduled' | 'approvals' = 'scheduled') => {
     fetchPosts();
-    setActiveTab('scheduled');
+    setActiveTab(destination);
   };
 
   const handlePostDeleted = (postId: string) => {
@@ -94,6 +104,7 @@ export default function Home() {
 
   const pendingPosts = posts.filter(p => p.status === 'pending');
   const publishedPosts = posts.filter(p => p.status === 'published');
+  const reviewPostCount = posts.filter(p => ['internal_review', 'client_review', 'client_approved'].includes(p.status)).length;
 
   // Apply filters to published posts
   const filteredPublishedPosts = useMemo(() => {
@@ -172,6 +183,16 @@ export default function Home() {
               Create Post
             </button>
             <button
+              onClick={() => setActiveTab('approvals')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'approvals'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Approvals ({reviewPostCount})
+            </button>
+            <button
               onClick={() => setActiveTab('scheduled')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'scheduled'
@@ -199,6 +220,13 @@ export default function Home() {
       <main className="max-w-5xl mx-auto px-4 py-8">
         {activeTab === 'create' && (
           <PostForm pages={pages} onPostCreated={handlePostCreated} />
+        )}
+        {activeTab === 'approvals' && (
+          <ApprovalsTab
+            canEdit={role === 'admin' || role === 'manager'}
+            isAdmin={role === 'admin'}
+            onScheduled={fetchPosts}
+          />
         )}
         {activeTab === 'scheduled' && (
           <PostList

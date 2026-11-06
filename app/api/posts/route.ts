@@ -1,36 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
+import { replacePlaceholders } from '@/lib/placeholders';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
-
-// Replace placeholders in text with actual values
-function replacePlaceholders(text: string, values: Record<string, string>): string {
-  if (!text) return text;
-
-  let result = text;
-  const placeholders: Record<string, string> = {
-    '{{CITY}}': values.city || '',
-    '{{FRANCHISENAME}}': values.franchise_name || '',
-    '{{LOCATION}}': values.location_number || '',
-    '{{BASEURL}}': values.base_url || '',
-    '{{PHONE}}': values.phone || '',
-  };
-
-  for (const [placeholder, value] of Object.entries(placeholders)) {
-    result = result.replace(new RegExp(placeholder, 'gi'), value);
-  }
-
-  // Fix URL duplication patterns (e.g., https://www.homeinsteadhttps://www.homeinstead.com/...)
-  // This handles cases where user types partial URL before {{BASEURL}} placeholder
-  result = result.replace(
-    /https?:\/\/[a-zA-Z0-9.-]*(https?:\/\/)/gi,
-    '$1'
-  );
-
-  return result;
-}
 
 // GET - Fetch all posts
 export async function GET() {

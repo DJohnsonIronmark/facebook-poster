@@ -42,7 +42,9 @@ export async function middleware(request: NextRequest) {
   // Public routes that don't require authentication
   const isPublicRoute =
     request.nextUrl.pathname.startsWith('/login') ||
-    request.nextUrl.pathname.startsWith('/auth/callback');
+    request.nextUrl.pathname.startsWith('/auth/callback') ||
+    // Client review pages: authenticated by the magic-link token, not a login
+    request.nextUrl.pathname.startsWith('/review/');
 
   // If no user and trying to access protected routes, redirect to login
   if (!user && !isPublicRoute) {

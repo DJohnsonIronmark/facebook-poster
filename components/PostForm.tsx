@@ -1,12 +1,39 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { FacebookPage } from '@/app/page';
 import SearchableMultiSelect from './SearchableMultiSelect';
+import FacebookPostPreview from './FacebookPostPreview';
+import { replacePlaceholders } from '@/lib/placeholders';
 
 interface PostFormProps {
   pages: FacebookPage[];
-  onPostCreated: () => void;
+  onPostCreated: (destination?: 'scheduled' | 'approvals') => void;
+}
+
+interface DraftPayload {
+  page_id: string;
+  post_content: string;
+  link_url: string | null;
+  scheduled_for: string | null;
+  media_type: string | null;
+  media_url: string | null;
+}
+
+// Sends rows for approval-enabled clients into the review queue; returns a human summary
+async function submitDrafts(rows: DraftPayload[]): Promise<{ ok: boolean; summary: string }> {
+  const res = await fetch('/api/review/drafts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rows }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, summary: data.error || 'Failed to submit drafts for review' };
+  const batches: { client: string; posts: number; email: string }[] = data.batches || [];
+  const parts = batches.map((b) => `${b.client}: ${b.posts} draft(s)${b.email === 'sent' ? ', team notified' : ' (notification email not sent)'}`);
+  const skipped: { row: number; reason: string }[] = data.skipped || [];
+  if (skipped.length) parts.push(`${skipped.length} skipped (${skipped.slice(0, 3).map((s) => `row ${s.row}: ${s.reason}`).join('; ')})`);
+  return { ok: batches.length > 0, summary: `Sent to approval: ${parts.join(' · ')}` };
 }
 
 interface CSVRow {
@@ -41,8 +68,23 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [isDraggingCSV, setIsDraggingCSV] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaFileInputRef = useRef<HTMLInputElement>(null);
+  const [approvalClientIds, setApprovalClientIds] = useState<Set<string>>(new Set());
+  const [useApproval, setUseApproval] = useState(true);
+  const [showBulkPreviews, setShowBulkPreviews] = useState(false);
+
+  // Which clients have the approval workflow turned on
+  useEffect(() => {
+    fetch('/api/clients')
+      .then((r) => (r.ok ? r.json() : { clients: [] }))
+      .then((d) => setApprovalClientIds(new Set((d.clients || []).filter((c: any) => c.approval_workflow_enabled).map((c: any) => c.id))))
+      .catch(() => {});
+  }, []);
+
+  const needsApproval = (page: FacebookPage | null | undefined) =>
+    useApproval && !!page?.client_id && approvalClientIds.has(page.client_id);
 
   const selectedPages = pages.filter(p => selectedPageIds.includes(p.id));
+  const singleHasApprovalPages = selectedPages.some(p => p.client_id && approvalClientIds.has(p.client_id));
 
   // Handle CSV drag and drop
   const handleDragOver = (e: React.DragEvent) => {
@@ -192,9 +234,26 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         }
       }
 
+      // Pages whose client uses the approval workflow go to the review queue instead
+      const approvalPages = selectedPages.filter(needsApproval);
+      const directPages = selectedPages.filter(p => !needsApproval(p));
+      let draftSummary = '';
+      if (approvalPages.length > 0) {
+        const drafts = await submitDrafts(approvalPages.map(page => ({
+          page_id: page.id,
+          post_content: postContent.trim(),
+          link_url: mediaType === 'text' ? (linkUrl.trim() || null) : null,
+          scheduled_for: !publishNow && scheduledFor ? new Date(scheduledFor).toISOString() : null,
+          media_type: mediaType !== 'text' ? mediaType : null,
+          media_url: finalMediaUrl,
+        })));
+        if (!drafts.ok) throw new Error(drafts.summary);
+        draftSummary = drafts.summary;
+      }
+
       // Create a post for each selected page
       const results = await Promise.all(
-        selectedPages.map(async (page) => {
+        directPages.map(async (page) => {
           const payload = {
             facebook_page_id: page.facebook_page_id,
             franchise_name: page.location_name,
@@ -226,11 +285,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         throw new Error(`Failed to create posts for: ${failed.map(f => f.page).join(', ')}`);
       }
 
-      if (publishNow) {
-        setSuccess(`Published to ${results.length} page(s) successfully!`);
-      } else {
-        setSuccess(`Scheduled ${results.length} post(s) successfully!`);
-      }
+      const directMsg = results.length === 0
+        ? ''
+        : publishNow
+          ? `Published to ${results.length} page(s) successfully!`
+          : `Scheduled ${results.length} post(s) successfully!`;
+      setSuccess([directMsg, draftSummary].filter(Boolean).join(' '));
 
       // Reset form
       setPostContent('');
@@ -247,13 +307,32 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       if (mediaFileInputRef.current) {
         mediaFileInputRef.current.value = '';
       }
-      onPostCreated();
+      onPostCreated(approvalPages.length > 0 && directPages.length === 0 ? 'approvals' : 'scheduled');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setSubmitting(false);
     }
   };
+
+  // Find the page by location_number first, then fall back to location_name
+  const resolvePage = (row: CSVRow): FacebookPage | undefined => {
+    let page: FacebookPage | undefined;
+    if (row.location_number && row.location_number.trim()) {
+      page = pages.find(p =>
+        p.location_number && p.location_number.toLowerCase() === row.location_number.toLowerCase()
+      );
+    }
+    if (!page && row.location_name && row.location_name.trim()) {
+      page = pages.find(p => p.location_name.toLowerCase() === row.location_name.toLowerCase());
+    }
+    return page;
+  };
+
+  const bulkApprovalCount = csvData.filter(r => {
+    const p = resolvePage(r);
+    return !!p?.client_id && approvalClientIds.has(p.client_id);
+  }).length;
 
   const handleBulkSubmit = async () => {
     setError(null);
@@ -267,25 +346,26 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
       let successCount = 0;
       let failedRows: string[] = [];
+      const draftRows: DraftPayload[] = [];
 
       for (const row of csvData) {
-        // Find the page by location_number first, then fall back to location_name
-        let page = null;
-
-        if (row.location_number && row.location_number.trim()) {
-          page = pages.find(p =>
-            p.location_number && p.location_number.toLowerCase() === row.location_number.toLowerCase()
-          );
-        }
-
-        if (!page && row.location_name && row.location_name.trim()) {
-          page = pages.find(p =>
-            p.location_name.toLowerCase() === row.location_name.toLowerCase()
-          );
-        }
+        const page = resolvePage(row);
 
         if (!page) {
           failedRows.push(`${row.location_number || row.location_name} (page not found)`);
+          continue;
+        }
+
+        // Approval-workflow clients: queue as drafts for internal → client review
+        if (needsApproval(page)) {
+          draftRows.push({
+            page_id: page.id,
+            post_content: row.post_content,
+            link_url: row.link_url || null,
+            scheduled_for: parseScheduledDate(row.scheduled_for),
+            media_type: row.media_type && row.media_type !== 'text' ? row.media_type : null,
+            media_url: row.media_url || null,
+          });
           continue;
         }
 
@@ -318,17 +398,26 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         }
       }
 
+      let draftSummary = '';
+      let draftsOk = false;
+      if (draftRows.length > 0) {
+        const drafts = await submitDrafts(draftRows);
+        draftsOk = drafts.ok;
+        if (drafts.ok) draftSummary = drafts.summary;
+        else failedRows.push(`${draftRows.length} approval draft(s): ${drafts.summary}`);
+      }
+
       if (failedRows.length > 0) {
         setError(`Failed rows: ${failedRows.join(', ')}`);
       }
 
-      if (successCount > 0) {
-        setSuccess(`Successfully created ${successCount} post(s)!`);
+      if (successCount > 0 || draftsOk) {
+        setSuccess([successCount > 0 ? `Successfully created ${successCount} post(s)!` : '', draftSummary].filter(Boolean).join(' '));
         setCsvData([]);
         if (fileInputRef.current) {
           fileInputRef.current.value = '';
         }
-        onPostCreated();
+        onPostCreated(draftsOk && successCount === 0 ? 'approvals' : 'scheduled');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -900,6 +989,32 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 </div>
               )}
 
+              {/* In-platform preview (first selected page, placeholders filled) */}
+              {postContent.trim() && (
+                <div className="border-t pt-6">
+                  <h3 className="text-sm font-medium text-gray-700 mb-3">
+                    Facebook preview{selectedPages.length > 1 ? ` (showing ${selectedPages[0].location_name} of ${selectedPages.length} pages)` : ''}
+                  </h3>
+                  <div className="bg-[#f0f2f5] rounded-lg p-4">
+                    {(() => {
+                      const pg = selectedPages[0];
+                      const vals = pg ? { city: pg.city, franchise_name: pg.location_name, location_number: pg.location_number, base_url: pg.base_url, phone: pg.phone } : {};
+                      return (
+                        <FacebookPostPreview
+                          pageName={pg?.location_name || 'Your Page'}
+                          facebookPageId={pg?.facebook_page_id}
+                          content={replacePlaceholders(postContent, vals)}
+                          linkUrl={mediaType === 'text' ? replacePlaceholders(linkUrl, vals) || null : null}
+                          mediaType={mediaType !== 'text' ? mediaType : null}
+                          mediaUrl={mediaType === 'text' ? null : (mediaInputMode === 'url' ? mediaUrl : (uploadedUrl || previewUrl))}
+                          scheduledFor={!publishNow && scheduledFor ? new Date(scheduledFor).toISOString() : null}
+                        />
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+
               {/* Publish Options */}
               <div className="border-t pt-6">
                 <div className="flex items-center gap-6 mb-4">
@@ -958,6 +1073,17 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg">
                   {success}
                 </div>
+              )}
+
+              {singleHasApprovalPages && (
+                <label className="flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-sm text-blue-900 cursor-pointer">
+                  <input type="checkbox" checked={useApproval} onChange={(e) => setUseApproval(e.target.checked)} className="mt-0.5 w-4 h-4" />
+                  <span>
+                    <strong>Send through client approval workflow</strong>:{' '}
+                    {selectedPages.filter(p => p.client_id && approvalClientIds.has(p.client_id)).length} selected page(s) belong to clients that require review.
+                    They&apos;ll be saved as drafts for internal review instead of {publishNow ? 'publishing' : 'scheduling'}.
+                  </span>
+                </label>
               )}
 
               {/* Submit Button */}
@@ -1065,9 +1191,48 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               {/* CSV Preview */}
               {csvData.length > 0 && (
                 <div>
-                  <h3 className="text-sm font-medium text-gray-700 mb-2">
-                    Preview ({csvData.length} posts)
-                  </h3>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-medium text-gray-700">
+                      Preview ({csvData.length} posts)
+                    </h3>
+                    <button type="button" onClick={() => setShowBulkPreviews(!showBulkPreviews)}
+                      className="text-sm text-blue-600 hover:text-blue-800">
+                      {showBulkPreviews ? 'Show table' : 'Show as Facebook posts'}
+                    </button>
+                  </div>
+                  {bulkApprovalCount > 0 && (
+                    <label className="flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 mb-3 text-sm text-blue-900 cursor-pointer">
+                      <input type="checkbox" checked={useApproval} onChange={(e) => setUseApproval(e.target.checked)} className="mt-0.5 w-4 h-4" />
+                      <span>
+                        <strong>Send through client approval workflow</strong>: {bulkApprovalCount} of {csvData.length} row(s) are for clients that require review.
+                        They&apos;ll be grouped into one review batch per client and the internal team member on each client will be alerted.
+                      </span>
+                    </label>
+                  )}
+                  {showBulkPreviews && (
+                    <div className="bg-[#f0f2f5] rounded-lg p-4 grid gap-4 max-h-[720px] overflow-auto" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))' }}>
+                      {csvData.map((row, index) => {
+                        const pg = resolvePage(row);
+                        const vals = pg ? { city: pg.city, franchise_name: pg.location_name, location_number: pg.location_number, base_url: pg.base_url, phone: pg.phone } : {};
+                        const isMedia = row.media_type && row.media_type !== 'text';
+                        return (
+                          <div key={index}>
+                            {!pg && <p className="text-xs text-red-600 mb-1">Row {index + 2}: page not found</p>}
+                            <FacebookPostPreview
+                              pageName={pg?.location_name || row.location_name || row.location_number}
+                              facebookPageId={pg?.facebook_page_id}
+                              content={replacePlaceholders(row.post_content, vals)}
+                              linkUrl={!isMedia ? replacePlaceholders(row.link_url, vals) || null : null}
+                              mediaType={isMedia ? row.media_type : null}
+                              mediaUrl={isMedia ? row.media_url : null}
+                              scheduledFor={parseScheduledDate(row.scheduled_for)}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {!showBulkPreviews && (
                   <div className="border rounded-lg overflow-hidden">
                     <div className="max-h-64 overflow-auto">
                       <table className="min-w-full divide-y divide-gray-200">
@@ -1104,6 +1269,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                       </table>
                     </div>
                   </div>
+                  )}
                 </div>
               )}
 

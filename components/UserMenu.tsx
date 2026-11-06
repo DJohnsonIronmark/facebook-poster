@@ -3,13 +3,14 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 
 export default function UserMenu() {
   const { user, role, signOut, loading } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -29,6 +30,9 @@ export default function UserMenu() {
     router.push('/login');
     router.refresh();
   };
+
+  // Client review pages are for external, logged-out reviewers
+  if (pathname?.startsWith('/review/')) return null;
 
   if (loading) {
     return (

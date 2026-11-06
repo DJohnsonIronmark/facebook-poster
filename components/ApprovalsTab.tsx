@@ -1,0 +1,433 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import FacebookPostPreview from './FacebookPostPreview';
+import DeviceToggle from './DeviceToggle';
+import ClientSettings from './ClientSettings';
+import type { ReviewBatch, ReviewPost } from '@/lib/review/types';
+import { downloadCSV, formatScheduledDate, parseCSVObjects, parseScheduledDate, toCSV } from '@/lib/csv';
+
+type Stage = 'internal_review' | 'client_review' | 'client_approved';
+
+const STAGES: { key: Stage; label: string; hint: string }[] = [
+  { key: 'internal_review', label: 'Internal review', hint: 'Drafts waiting on the Ironmark team' },
+  { key: 'client_review', label: 'With client', hint: 'Client has the review link' },
+  { key: 'client_approved', label: 'Client approved', hint: 'Finalize copy and schedule' },
+];
+
+const FINAL_HEADERS = ['post_id', 'client', 'location_number', 'location_name', 'post_content', 'link_url', 'media_url', 'scheduled_for', 'client_comment'];
+
+interface Props {
+  canEdit: boolean;   // admin/manager
+  isAdmin: boolean;
+  onScheduled: () => void;
+}
+
+export default function ApprovalsTab({ canEdit, isAdmin, onScheduled }: Props) {
+  const [batches, setBatches] = useState<ReviewBatch[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [stage, setStage] = useState<Stage>('internal_review');
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop');
+  const [banner, setBanner] = useState<{ kind: 'ok' | 'error'; text: string; link?: string } | null>(null);
+  const [showClients, setShowClients] = useState(false);
+  const finalInputRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/review/batches', { cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load approvals');
+      setBatches(data.batches || []);
+    } catch (e) {
+      setBanner({ kind: 'error', text: e instanceof Error ? e.message : 'Failed to load approvals' });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const byStage = useMemo(() => {
+    const m: Record<Stage, ReviewBatch[]> = { internal_review: [], client_review: [], client_approved: [] };
+    for (const b of batches) if (b.status in m) m[b.status as Stage].push(b);
+    return m;
+  }, [batches]);
+
+  const act = async (batch: ReviewBatch, action: string, extra: Record<string, unknown> = {}) => {
+    setBanner(null);
+    const res = await fetch(`/api/review/batches/${batch.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...extra }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setBanner({ kind: 'error', text: data.error || 'Action failed' });
+      return null;
+    }
+    return data;
+  };
+
+  const emailNote = (email?: string) =>
+    email === 'sent' ? 'Email sent.' : email === 'skipped' ? 'Email NOT sent (email not configured) — copy the link below and send it yourself.' : 'Email FAILED — copy the link below and send it yourself.';
+
+  // ---------- final-form bulk export / upload across all client-approved batches ----------
+  const exportFinal = () => {
+    const rows = byStage.client_approved.flatMap((b) =>
+      (b.posts || []).map((p) => [p.id, b.client?.name || '', p.location_number, p.franchise_name, p.post_content, p.link_url, p.media_url, formatScheduledDate(p.scheduled_for), p.client_comment]),
+    );
+    downloadCSV(`facebook_final_posts_${new Date().toISOString().slice(0, 10)}.csv`, toCSV(FINAL_HEADERS, rows));
+  };
+
+  const uploadFinal = async (file: File) => {
+    setBanner(null);
+    const rows = parseCSVObjects(await file.text());
+    if (rows.length === 0 || !('post_id' in rows[0])) {
+      setBanner({ kind: 'error', text: 'CSV needs a post_id column. Start from "Export approved posts".' });
+      return;
+    }
+    const batchOfPost = new Map<string, ReviewBatch>();
+    byStage.client_approved.forEach((b) => (b.posts || []).forEach((p) => batchOfPost.set(p.id, b)));
+
+    const grouped = new Map<string, { batch: ReviewBatch; rows: Record<string, unknown>[] }>();
+    const problems: string[] = [];
+    rows.forEach((r, i) => {
+      const b = batchOfPost.get(r.post_id);
+      if (!b) { problems.push(`Row ${i + 2}: post ${r.post_id || '(blank)'} is not in a client-approved batch`); return; }
+      const scheduled = r.scheduled_for ? parseScheduledDate(r.scheduled_for) : undefined;
+      if (r.scheduled_for && !scheduled) { problems.push(`Row ${i + 2}: can't read date "${r.scheduled_for}"`); return; }
+      const g = grouped.get(b.id) || { batch: b, rows: [] };
+      g.rows.push({ post_id: r.post_id, post_content: r.post_content, link_url: r.link_url, media_url: r.media_url, scheduled_for: scheduled });
+      grouped.set(b.id, g);
+    });
+
+    let updated = 0;
+    for (const { batch, rows: bRows } of Array.from(grouped.values())) {
+      const data = await act(batch, 'final_upload', { rows: bRows });
+      if (data) { updated += data.updated; problems.push(...(data.problems || []).map((p: string) => `${batch.name}: ${p}`)); }
+    }
+    await load();
+    setBanner({
+      kind: problems.length ? 'error' : 'ok',
+      text: `Updated ${updated} post(s) from ${file.name}.${problems.length ? ` ${problems.length} issue(s): ${problems.slice(0, 5).join('; ')}${problems.length > 5 ? '…' : ''}` : ' Review the previews, then schedule.'}`,
+    });
+  };
+
+  const counts = { internal_review: byStage.internal_review.length, client_review: byStage.client_review.length, client_approved: byStage.client_approved.length };
+
+  return (
+    <div className="space-y-4">
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="inline-flex rounded-lg bg-white shadow-sm p-1" role="tablist">
+          {STAGES.map((s) => (
+            <button key={s.key} role="tab" aria-selected={stage === s.key} title={s.hint}
+              onClick={() => setStage(s.key)}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium ${stage === s.key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+              {s.label} <span className="opacity-75">({counts[s.key]})</span>
+            </button>
+          ))}
+        </div>
+        <DeviceToggle value={device} onChange={setDevice} />
+        <div className="ml-auto flex gap-2">
+          <button onClick={load} className="px-3 py-1.5 text-sm rounded-lg bg-white shadow-sm text-gray-700 hover:bg-gray-50">Refresh</button>
+          {isAdmin && (
+            <button onClick={() => setShowClients(!showClients)} className="px-3 py-1.5 text-sm rounded-lg bg-white shadow-sm text-gray-700 hover:bg-gray-50">
+              {showClients ? 'Hide client settings' : 'Client settings'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {showClients && isAdmin && <ClientSettings />}
+
+      {banner && (
+        <div className={`rounded-lg px-4 py-3 border text-sm ${banner.kind === 'ok' ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-700'}`} role="status">
+          {banner.text}
+          {banner.link && (
+            <div className="mt-2 flex gap-2 items-center">
+              <input readOnly value={banner.link} className="flex-1 border rounded px-2 py-1 text-xs font-mono bg-white text-gray-800" onFocus={(e) => e.target.select()} />
+              <button onClick={() => navigator.clipboard.writeText(banner.link!)} className="px-2 py-1 text-xs rounded bg-white border">Copy</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {stage === 'client_approved' && canEdit && byStage.client_approved.length > 0 && (
+        <div className="bg-white rounded-lg shadow-sm px-4 py-3 flex flex-wrap items-center gap-3 text-sm">
+          <span className="text-gray-700 mr-auto">
+            Bulk final form: export, adjust copy/dates in Excel or Sheets, upload, then schedule.
+          </span>
+          <button onClick={exportFinal} className="px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 font-medium hover:bg-blue-100">Export approved posts (CSV)</button>
+          <button onClick={() => finalInputRef.current?.click()} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">Upload final CSV</button>
+          <input ref={finalInputRef} type="file" accept=".csv" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFinal(f); e.target.value = ''; }} />
+        </div>
+      )}
+
+      {loading ? (
+        <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600">Loading approvals…</div>
+      ) : byStage[stage].length === 0 ? (
+        <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
+          Nothing in {STAGES.find((s) => s.key === stage)!.label.toLowerCase()}.
+        </div>
+      ) : (
+        byStage[stage].map((batch) => (
+          <BatchCard
+            key={batch.id}
+            batch={batch}
+            open={openId === batch.id}
+            onToggle={() => setOpenId(openId === batch.id ? null : batch.id)}
+            device={device}
+            canEdit={canEdit}
+            onChanged={load}
+            onAction={async (action) => {
+              const data = await act(batch, action);
+              if (!data) return;
+              if (action === 'approve_internal' || action === 'resend_link') {
+                setBanner({ kind: data.email === 'sent' ? 'ok' : 'error', text: `${batch.name} sent to client. ${emailNote(data.email)}`, link: data.review_url });
+              } else if (action === 'schedule') {
+                setBanner({
+                  kind: data.failures?.length ? 'error' : 'ok',
+                  text: `Scheduled ${data.scheduled} post(s) for ${batch.client?.name}.${data.failures?.length ? ` Failed: ${data.failures.join('; ')}` : ''}`,
+                });
+                onScheduled();
+              } else if (action === 'cancel') {
+                setBanner({ kind: 'ok', text: `${batch.name} cancelled. Its posts will not publish.` });
+              }
+              await load();
+            }}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+
+function BatchCard({
+  batch, open, onToggle, device, canEdit, onChanged, onAction,
+}: {
+  batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean;
+  onChanged: () => void; onAction: (action: string) => Promise<void>;
+}) {
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [working, setWorking] = useState(false);
+  const posts = batch.posts || [];
+  const edited = posts.filter((p) => p.client_edited).length;
+  const comments = posts.filter((p) => p.client_comment).length;
+  const unscheduled = posts.filter((p) => !p.scheduled_for).length;
+  const fmt = (d?: string | null) => (d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '');
+
+  const run = async (action: string) => {
+    setWorking(true);
+    await onAction(action);
+    setWorking(false);
+    setConfirm(null);
+  };
+
+  const confirmText: Record<string, string> = {
+    approve_internal: `Email the review link to ${batch.client?.client_reviewer_emails?.join(', ') || '(no client emails configured)'}?`,
+    resend_link: 'Send a new link? The previous link will stop working.',
+    schedule: `Schedule ${posts.length} post(s) for ${batch.client?.name}? They will publish to Facebook at their scheduled times.`,
+    cancel: 'Cancel this batch? Its posts will never publish and the client link stops working.',
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow">
+      <div className="p-4 flex flex-wrap items-start gap-3">
+        <button onClick={onToggle} className="text-left flex-1 min-w-[240px]" aria-expanded={open}>
+          <div className="font-semibold text-gray-900">{batch.name}</div>
+          <div className="text-sm text-gray-500 mt-0.5 space-x-2">
+            <span>{posts.length} post{posts.length === 1 ? '' : 's'}</span>
+            {batch.created_by_email && <span>· uploaded by {batch.created_by_email}</span>}
+            {batch.status === 'client_review' && batch.sent_to_client_at && <span>· sent {fmt(batch.sent_to_client_at)}, link expires {fmt(batch.client_token_expires_at)}</span>}
+            {batch.status === 'client_approved' && <span>· approved by {batch.client_approved_by} {fmt(batch.client_approved_at)}</span>}
+          </div>
+          <div className="flex flex-wrap gap-2 mt-2">
+            {edited > 0 && <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">{edited} edited by client</span>}
+            {comments > 0 && <span className="text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full">{comments} client note{comments === 1 ? '' : 's'}</span>}
+            {batch.status === 'client_approved' && unscheduled > 0 && <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full">{unscheduled} missing a schedule date</span>}
+          </div>
+        </button>
+
+        {canEdit && (
+          <div className="flex flex-wrap items-center gap-2">
+            {confirm ? (
+              <>
+                <span className="text-sm text-gray-700 max-w-xs">{confirmText[confirm]}</span>
+                <button disabled={working} onClick={() => setConfirm(null)} className="px-3 py-1.5 text-sm rounded-lg border">No</button>
+                <button disabled={working} onClick={() => run(confirm)}
+                  className={`px-3 py-1.5 text-sm rounded-lg text-white ${confirm === 'cancel' ? 'bg-red-600' : 'bg-blue-600'} disabled:opacity-50`}>
+                  {working ? 'Working…' : 'Yes'}
+                </button>
+              </>
+            ) : (
+              <>
+                {batch.status === 'internal_review' && (
+                  <button onClick={() => setConfirm('approve_internal')} className="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+                    Approve → send to client
+                  </button>
+                )}
+                {batch.status === 'client_review' && (
+                  <button onClick={() => setConfirm('resend_link')} className="px-3 py-1.5 text-sm rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100">
+                    Resend client link
+                  </button>
+                )}
+                {batch.status === 'client_approved' && (
+                  <button onClick={() => setConfirm('schedule')} disabled={unscheduled > 0}
+                    title={unscheduled > 0 ? 'Every post needs a schedule date first' : undefined}
+                    className="px-3 py-1.5 text-sm rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-300">
+                    Schedule {posts.length} post{posts.length === 1 ? '' : 's'}
+                  </button>
+                )}
+                <button onClick={() => setConfirm('cancel')} className="px-3 py-1.5 text-sm rounded-lg bg-red-50 text-red-700 hover:bg-red-100">Cancel</button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {open && (
+        <div className="border-t bg-[#f0f2f5] p-4 grid gap-5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${device === 'mobile' ? 340 : 440}px, 1fr))` }}>
+          {posts.map((p) => (
+            <PostReviewCard key={p.id} post={p} device={device}
+              editable={canEdit && (batch.status === 'internal_review' || batch.status === 'client_approved')}
+              onChanged={onChanged} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function toLocalInput(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+function PostReviewCard({ post, device, editable, onChanged }: {
+  post: ReviewPost; device: 'desktop' | 'mobile'; editable: boolean; onChanged: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [content, setContent] = useState(post.post_content);
+  const [link, setLink] = useState(post.link_url || '');
+  const [when, setWhen] = useState(toLocalInput(post.scheduled_for));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showOriginal, setShowOriginal] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  useEffect(() => {
+    setContent(post.post_content);
+    setLink(post.link_url || '');
+    setWhen(toLocalInput(post.scheduled_for));
+  }, [post.post_content, post.link_url, post.scheduled_for]);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    const body: Record<string, unknown> = { post_content: content, scheduled_for: when ? new Date(when).toISOString() : null };
+    if (!post.media_type) body.link_url = link;
+    const res = await fetch(`/api/review/posts/${post.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    setSaving(false);
+    if (!res.ok) { setError(data.error || 'Save failed'); return; }
+    setEditing(false);
+    onChanged();
+  };
+
+  const remove = async () => {
+    const res = await fetch(`/api/review/posts/${post.id}`, { method: 'DELETE' });
+    if (!res.ok) { setError((await res.json().catch(() => ({}))).error || 'Remove failed'); return; }
+    onChanged();
+  };
+
+  return (
+    <div className="space-y-2">
+      <FacebookPostPreview
+        pageName={post.franchise_name}
+        facebookPageId={post.facebook_page_id}
+        content={editing ? content : post.post_content}
+        linkUrl={editing && !post.media_type ? link : post.link_url}
+        linkPreview={editing && link !== (post.link_url || '') ? null : post.link_preview}
+        mediaType={post.media_type}
+        mediaUrl={post.media_url}
+        scheduledFor={editing ? (when ? new Date(when).toISOString() : null) : post.scheduled_for}
+        device={device}
+      />
+
+      <div className="bg-white rounded-lg p-3 text-sm space-y-2 max-w-[500px] mx-auto">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-gray-800">{post.location_number ? `${post.location_number} · ` : ''}{post.franchise_name}</span>
+          {post.client_edited && (
+            <button onClick={() => setShowOriginal(!showOriginal)} className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full hover:bg-amber-200">
+              Edited by client {showOriginal ? '▲' : '▼'}
+            </button>
+          )}
+          {!post.scheduled_for && <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full">No date</span>}
+        </div>
+
+        {showOriginal && post.original_content && (
+          <div className="bg-gray-50 border rounded p-2">
+            <div className="text-xs uppercase text-gray-500 mb-1">Original draft</div>
+            <p className="whitespace-pre-wrap text-gray-600">{post.original_content}</p>
+          </div>
+        )}
+        {post.client_comment && (
+          <div className="bg-purple-50 border border-purple-100 rounded p-2 text-purple-900">
+            <span className="font-medium">Client note:</span> {post.client_comment}
+          </div>
+        )}
+
+        {editing ? (
+          <div className="space-y-2">
+            <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={6}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500" />
+            {!post.media_type && (
+              <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="Link URL (optional)"
+                className="w-full border border-gray-300 rounded-lg px-3 py-1.5" />
+            )}
+            <label className="flex items-center gap-2 text-gray-700">
+              Schedule
+              <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} className="border border-gray-300 rounded-lg px-2 py-1" />
+            </label>
+            {error && <p className="text-red-600">{error}</p>}
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => { setEditing(false); setContent(post.post_content); setLink(post.link_url || ''); setWhen(toLocalInput(post.scheduled_for)); }}
+                className="px-3 py-1.5 rounded-lg border">Cancel</button>
+              <button onClick={save} disabled={saving || !content.trim()} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          editable && (
+            <div className="flex gap-2 justify-end">
+              {confirmRemove ? (
+                <>
+                  <span className="text-gray-600 mr-auto">Remove this post from the batch?</span>
+                  <button onClick={() => setConfirmRemove(false)} className="px-3 py-1 rounded-lg border">No</button>
+                  <button onClick={remove} className="px-3 py-1 rounded-lg bg-red-600 text-white">Remove</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => setConfirmRemove(true)} className="px-3 py-1 rounded-lg text-red-700 hover:bg-red-50">Remove</button>
+                  <button onClick={() => setEditing(true)} className="px-3 py-1 rounded-lg bg-gray-100 text-gray-800 hover:bg-gray-200">Edit</button>
+                </>
+              )}
+            </div>
+          )
+        )}
+        {error && !editing && <p className="text-red-600">{error}</p>}
+      </div>
+    </div>
+  );
+}
