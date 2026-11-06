@@ -595,10 +595,18 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const downloadTemplate = () => {
     const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for', 'media_type', 'media_url'];
+    // Non-franchise example: blank location_number, matched on the exact page name.
+    // Dates are 95+ days out so a test upload can be reviewed and deleted long before it's due.
+    const daysOut = (days: number, hour: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      d.setHours(hour, 0, 0, 0);
+      const h = d.getHours();
+      return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()} ${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
+    };
     const exampleRows = [
-      ['1234', 'Home Instead San Diego', 'Check out our latest blog post!', 'https://example.com/blog', '01/20/2025 10:00 AM', '', ''],
-      ['5678', 'Home Instead Denver', 'Meet our Care Pro of the Month!', '', '01/20/2025 2:00 PM', 'photo', 'https://example.com/images/care-pro.jpg'],
-      ['9012', 'Home Instead Austin', 'Watch our new video about senior care', '', '01/21/2025 9:00 AM', 'video', 'https://example.com/videos/senior-care.mp4'],
+      ['', 'IANA', 'TEST POST, do not publish. Checking the approval workflow with a link post.', 'https://example.com', daysOut(95, 10), '', ''],
+      ['', 'IANA', 'TEST POST, do not publish. Checking the approval workflow with a text-only post.', '', daysOut(96, 14), '', ''],
     ];
 
     const csv = [
@@ -1320,6 +1328,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <li>• <strong>media_url</strong> (optional): Publicly accessible URL to photo or video file</li>
                 </ul>
                 <p className="text-sm text-gray-500 mt-2">Note: Either location_number or location_name is required for each row.</p>
+                <p className="text-sm text-gray-500 mt-1">
+                  Non-franchise pages (e.g. IANA): leave location_number blank and enter the page name exactly as it appears on the Pages tab.
+                  Avoid {'{{CITY}}'}/{'{{BASEURL}}'}/{'{{PHONE}}'} unless those fields are filled in for the page.
+                </p>
               </div>
             </div>
           </>
