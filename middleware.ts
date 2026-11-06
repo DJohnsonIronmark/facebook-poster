@@ -66,6 +66,7 @@ export async function middleware(request: NextRequest) {
 // Apply middleware to all routes except static files and api routes
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    // template-media/ holds the CSV template's labeled TEST photo/video; it must be fetchable without login
+    '/((?!_next/static|_next/image|favicon.ico|api/|template-media/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 };
