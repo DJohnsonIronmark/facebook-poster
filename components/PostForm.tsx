@@ -69,7 +69,6 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaFileInputRef = useRef<HTMLInputElement>(null);
   const [approvalClientIds, setApprovalClientIds] = useState<Set<string>>(new Set());
-  const [useApproval, setUseApproval] = useState(true);
   const [showBulkPreviews, setShowBulkPreviews] = useState(false);
 
   // Which clients have the approval workflow turned on
@@ -81,7 +80,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   }, []);
 
   const needsApproval = (page: FacebookPage | null | undefined) =>
-    useApproval && !!page?.client_id && approvalClientIds.has(page.client_id);
+    !!page?.client_id && approvalClientIds.has(page.client_id);
 
   const selectedPages = pages.filter(p => selectedPageIds.includes(p.id));
   const singleHasApprovalPages = selectedPages.some(p => p.client_id && approvalClientIds.has(p.client_id));
@@ -1076,14 +1075,13 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               )}
 
               {singleHasApprovalPages && (
-                <label className="flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-sm text-blue-900 cursor-pointer">
-                  <input type="checkbox" checked={useApproval} onChange={(e) => setUseApproval(e.target.checked)} className="mt-0.5 w-4 h-4" />
+                <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-sm text-blue-900">
                   <span>
-                    <strong>Send through client approval workflow</strong>:{' '}
+                    <strong>Client approval workflow</strong>:{' '}
                     {selectedPages.filter(p => p.client_id && approvalClientIds.has(p.client_id)).length} selected page(s) belong to clients that require review.
                     They&apos;ll be saved as drafts for internal review instead of {publishNow ? 'publishing' : 'scheduling'}.
                   </span>
-                </label>
+                </div>
               )}
 
               {/* Submit Button */}
@@ -1201,13 +1199,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     </button>
                   </div>
                   {bulkApprovalCount > 0 && (
-                    <label className="flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 mb-3 text-sm text-blue-900 cursor-pointer">
-                      <input type="checkbox" checked={useApproval} onChange={(e) => setUseApproval(e.target.checked)} className="mt-0.5 w-4 h-4" />
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 mb-3 text-sm text-blue-900">
                       <span>
-                        <strong>Send through client approval workflow</strong>: {bulkApprovalCount} of {csvData.length} row(s) are for clients that require review.
+                        <strong>Client approval workflow</strong>: {bulkApprovalCount} of {csvData.length} row(s) are for clients that require review.
                         They&apos;ll be grouped into one review batch per client and the internal team member on each client will be alerted.
                       </span>
-                    </label>
+                    </div>
                   )}
                   {showBulkPreviews && (
                     <div className="bg-[#f0f2f5] rounded-lg p-4 grid gap-4 max-h-[720px] overflow-auto" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))' }}>

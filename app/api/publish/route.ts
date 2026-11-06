@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
+import { UUID_RE } from '@/lib/review/guards';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -14,9 +15,9 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { post_id } = body;
 
-    if (!post_id) {
+    if (!post_id || !UUID_RE.test(String(post_id))) {
       return NextResponse.json(
-        { error: 'Post ID is required' },
+        { error: 'Valid post ID is required' },
         { status: 400 }
       );
     }
@@ -57,6 +58,15 @@ export async function POST(request: NextRequest) {
     }
 
     const post = posts[0];
+
+    // Approval workflow: only posts already released to 'pending' can be published from here
+    // (review posts move to 'pending' only via Approvals → Schedule).
+    if (post.status !== 'pending') {
+      return NextResponse.json(
+        { error: post.review_batch_id ? 'This post is in the approval workflow; schedule it from Approvals once the client approves.' : `Post is ${post.status}` },
+        { status: 409 }
+      );
+    }
 
     // Trigger n8n webhook
     const webhookPayload = {

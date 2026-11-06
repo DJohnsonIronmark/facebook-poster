@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { replacePlaceholders } from '@/lib/placeholders';
+import { UUID_RE, pageRequiresApproval } from '@/lib/review/guards';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -70,6 +71,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Missing required fields' },
         { status: 400 }
+      );
+    }
+
+    // Approval workflow is enforced server-side, not just in the form
+    if (await pageRequiresApproval(String(facebook_page_id))) {
+      return NextResponse.json(
+        { error: "This page's client requires approval. Submit it as a draft through the approval workflow." },
+        { status: 409 }
       );
     }
 
@@ -265,9 +274,9 @@ export async function DELETE(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const postId = searchParams.get('id');
 
-    if (!postId) {
+    if (!postId || !UUID_RE.test(postId)) {
       return NextResponse.json(
-        { error: 'Post ID is required' },
+        { error: 'Valid post ID is required' },
         { status: 400 }
       );
     }

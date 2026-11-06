@@ -15,7 +15,7 @@ async function resolveBatch(token: string) {
   const supabase = createServiceClient();
   const { data } = await supabase
     .from('fb_review_batches')
-    .select(`id, name, status, client_token_expires_at, client_approved_by, client_approved_at, client:fb_clients(name, internal_reviewer_emails), posts:facebook_scheduled_posts(${CLIENT_POST_COLUMNS})`)
+    .select(`id, name, status, client_token_expires_at, client_approved_by, client_approved_at, client:fb_clients!client_id(name, internal_reviewer_emails), posts:facebook_scheduled_posts!review_batch_id(${CLIENT_POST_COLUMNS})`)
     .eq('client_token_hash', hashReviewToken(token))
     .maybeSingle();
   if (!data) return { supabase, batch: null };
@@ -84,7 +84,8 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
     }
     if (Object.keys(patch).length === 0) continue;
 
-    const { error } = await supabase.from('facebook_scheduled_posts').update(patch).eq('id', post.id).eq('review_batch_id', batch.id);
+    const { error } = await supabase.from('facebook_scheduled_posts').update(patch)
+      .eq('id', post.id).eq('review_batch_id', batch.id).eq('status', 'client_review');
     if (error) return NextResponse.json({ error: 'Failed to save your changes. Please try again.' }, { status: 500 });
     if (patch.post_content) {
       editedCount++;
@@ -97,12 +98,18 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
 
   if (action === 'save') return NextResponse.json({ success: true, saved: editedCount });
 
+  // Claim the batch first (conditional on still being in client review), then release its posts
   const now = new Date().toISOString();
-  const p = await supabase.from('facebook_scheduled_posts').update({ status: 'client_approved' }).eq('review_batch_id', batch.id);
   const b = await supabase.from('fb_review_batches').update({
     status: 'client_approved', client_approved_by: approver, client_approved_at: now, updated_at: now,
-  }).eq('id', batch.id).eq('status', 'client_review');
-  if (p.error || b.error) return NextResponse.json({ error: 'Failed to approve. Please try again.' }, { status: 500 });
+  }).eq('id', batch.id).eq('status', 'client_review').select('id');
+  if (b.error) return NextResponse.json({ error: 'Failed to approve. Please try again.' }, { status: 500 });
+  if ((b.data || []).length !== 1) {
+    return NextResponse.json({ error: 'These posts are no longer awaiting your approval. Please contact your Ironmark team.' }, { status: 409 });
+  }
+  const p = await supabase.from('facebook_scheduled_posts').update({ status: 'client_approved' })
+    .eq('review_batch_id', batch.id).eq('status', 'client_review');
+  if (p.error) return NextResponse.json({ error: 'Failed to approve. Please try again.' }, { status: 500 });
 
   // Count every post the client changed during this review (across earlier saves too)
   const { data: clientEdits } = await supabase

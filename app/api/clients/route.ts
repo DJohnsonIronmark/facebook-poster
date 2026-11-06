@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth, requireRole } from '@/lib/auth';
+import { getUserRole, requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { validEmails } from '@/lib/review/notify';
 
@@ -7,8 +7,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // GET - clients + the pages assigned to each (any signed-in user)
 export async function GET() {
-  const { error: authError } = await requireAuth();
-  if (authError) return authError;
+  const { user, error: authError } = await requireAuth();
+  if (authError || !user) return authError!;
+  const role = await getUserRole(user.id);
 
   const supabase = createServiceClient();
   const [clients, pages] = await Promise.all([
@@ -19,7 +20,11 @@ export async function GET() {
     console.error('clients GET', clients.error || pages.error);
     return NextResponse.json({ error: 'Failed to load clients' }, { status: 500 });
   }
-  return NextResponse.json({ clients: clients.data, pages: pages.data });
+  // Reviewer contact emails are only for people who run the workflow
+  const canSeeEmails = role === 'admin' || role === 'manager';
+  const out = (clients.data || []).map((c: any) =>
+    canSeeEmails ? c : { ...c, internal_reviewer_emails: [], client_reviewer_emails: [] });
+  return NextResponse.json({ clients: out, pages: pages.data });
 }
 
 // POST - create a client (admin)

@@ -50,8 +50,10 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   if (Object.keys(patch).length === 0) return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
 
   const { data, error } = await supabase
-    .from('facebook_scheduled_posts').update(patch).eq('id', post.id).select(POST_REVIEW_COLUMNS).single();
+    .from('facebook_scheduled_posts').update(patch).eq('id', post.id).in('status', EDITABLE)
+    .select(POST_REVIEW_COLUMNS).maybeSingle();
   if (error) return NextResponse.json({ error: 'Failed to save post' }, { status: 500 });
+  if (!data) return NextResponse.json({ error: 'Post moved to another stage; refresh and try again' }, { status: 409 });
 
   if ('post_content' in patch || 'link_url' in patch || 'media_url' in patch) {
     await supabase.from('fb_post_revisions').insert({

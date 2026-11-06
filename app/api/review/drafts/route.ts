@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
   const pageIds = Array.from(new Set(rows.map((r) => String(r.page_id)).filter((id) => UUID_RE.test(id))));
   const { data: pages, error: pagesErr } = await supabase
     .from('facebook_pages')
-    .select('id, location_name, location_number, facebook_page_id, city, base_url, phone, client_id, client:fb_clients(*)')
+    .select('id, location_name, location_number, facebook_page_id, city, base_url, phone, client_id, client:fb_clients!client_id(*)')
     .in('id', pageIds);
   if (pagesErr) {
     console.error('drafts: pages lookup', pagesErr);

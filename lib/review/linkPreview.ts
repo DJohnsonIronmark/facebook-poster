@@ -1,33 +1,55 @@
 import { lookup } from 'dns/promises';
-import { isIP } from 'net';
+import { BlockList, isIP } from 'net';
 import type { LinkPreview } from './types';
 
 // Server-side Open Graph fetch so link posts can be previewed like Facebook's link card.
-// SSRF-guarded: http(s) only, public IPs only, no redirects to private hosts, 5s timeout, 1MB cap.
+// SSRF-guarded: http(s) on 80/443 only, public IPs only (re-checked on every redirect),
+// 5s timeout, 1MB cap. DNS-rebinding between lookup and fetch is an accepted residual risk.
 
-function isPrivateIp(ip: string): boolean {
-  if (ip.includes(':')) {
-    const v = ip.toLowerCase();
-    if (v.startsWith('::ffff:')) return isPrivateIp(v.slice(7));
-    return v === '::1' || v === '::' || v.startsWith('fc') || v.startsWith('fd') || v.startsWith('fe80');
+const blocked = new BlockList();
+for (const [net, prefix] of [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
+  ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
+  ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 3],
+] as const) blocked.addSubnet(net, prefix, 'ipv4');
+for (const [net, prefix] of [
+  ['::', 96],          // unspecified, loopback, IPv4-compatible
+  // IPv4-mapped (::ffff:0:0/96) is NOT listed: BlockList matches every IPv4 against it.
+  // Mapped addresses are expanded by mappedV4() and checked against the IPv4 list instead.
+  ['64:ff9b::', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001:db8::', 32], ['2002::', 16],
+  ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8],
+] as const) blocked.addSubnet(net, prefix, 'ipv6');
+
+/** ::ffff:7f00:1 / ::ffff:127.0.0.1 → 127.0.0.1 */
+function mappedV4(ip: string): string | null {
+  const m = ip.toLowerCase().match(/^(?:0{0,4}:){0,5}:?ffff:(.+)$/);
+  if (!m) return null;
+  const tail = m[1];
+  if (isIP(tail) === 4) return tail;
+  const hex = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!hex) return null;
+  const hi = parseInt(hex[1], 16), lo = parseInt(hex[2], 16);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
+export function isPrivateIp(ip: string): boolean {
+  const family = isIP(ip);
+  if (family === 4) return blocked.check(ip, 'ipv4');
+  if (family === 6) {
+    const v4 = mappedV4(ip);
+    if (v4) return blocked.check(v4, 'ipv4');
+    return blocked.check(ip, 'ipv6');
   }
-  const [a, b] = ip.split('.').map(Number);
-  return (
-    a === 10 || a === 127 || a === 0 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    a >= 224
-  );
+  return true; // not an IP literal: refuse
 }
 
 async function assertPublicUrl(raw: string): Promise<URL> {
   const url = new URL(raw);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('unsupported protocol');
   if (url.username || url.password) throw new Error('credentials in URL');
+  if (url.port && url.port !== '80' && url.port !== '443') throw new Error('non-standard port');
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
+  const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true, verbatim: true });
   if (addrs.length === 0 || addrs.some((a) => isPrivateIp(a.address))) throw new Error('non-public host');
   return url;
 }

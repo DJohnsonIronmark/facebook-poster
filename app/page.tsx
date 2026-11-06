@@ -104,8 +104,6 @@ export default function Home() {
 
   const pendingPosts = posts.filter(p => p.status === 'pending');
   const publishedPosts = posts.filter(p => p.status === 'published');
-  const reviewPostCount = posts.filter(p => ['internal_review', 'client_review', 'client_approved'].includes(p.status)).length;
-
   // Apply filters to published posts
   const filteredPublishedPosts = useMemo(() => {
     return publishedPosts.filter(post => {
@@ -190,7 +188,7 @@ export default function Home() {
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              Approvals ({reviewPostCount})
+              Approvals
             </button>
             <button
               onClick={() => setActiveTab('scheduled')}
