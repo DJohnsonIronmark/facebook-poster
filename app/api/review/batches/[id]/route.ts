@@ -66,6 +66,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     if (upd.error) return null;
     const email = await notifyClientReview({
       to: recipients, clientName: batch.client.name, postCount: posts.length, reviewUrl, expiresAt,
+      replyTo: batch.client.internal_reviewer_emails || [],
     });
     return { email, review_url: reviewUrl, expires_at: expiresAt };
   };

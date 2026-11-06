@@ -1,9 +1,14 @@
-// Email notifications via Resend's REST API (same provider as client-dashboard).
-// Env: RESEND_API_KEY, RESEND_FROM_EMAIL (optional), APP_BASE_URL (optional; falls back to request origin)
+// Email notifications. Transport, in order of preference:
+//   1. Google Apps Script web app (apps-script/notification-mailer.gs) — MailApp from the deploying
+//      Google account. Env: APPS_SCRIPT_MAIL_URL, APPS_SCRIPT_MAIL_SECRET, MAIL_SENDER_NAME (optional)
+//   2. Resend REST API. Env: RESEND_API_KEY, RESEND_FROM_EMAIL (optional)
+// If neither is configured, emails are skipped (logged) and the UI shows the review link to copy.
+// APP_BASE_URL (optional) overrides the request origin used in links.
 
 export type EmailResult = 'sent' | 'skipped' | 'failed';
 
 const RESEND_FROM = process.env.RESEND_FROM_EMAIL || 'social@dashboard.ironmarkusa.com';
+const SENDER_NAME = process.env.MAIL_SENDER_NAME || 'Ironmark';
 
 export function escapeHtml(s: string): string {
   return s
@@ -26,21 +31,54 @@ export function validEmails(list: unknown): string[] {
     .filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
 }
 
-async function sendEmail(to: string[], subject: string, html: string): Promise<EmailResult> {
+async function sendViaAppsScript(url: string, to: string[], subject: string, html: string, replyTo: string[]): Promise<EmailResult> {
+  const secret = process.env.APPS_SCRIPT_MAIL_SECRET;
+  if (!secret) {
+    console.error('[notify] APPS_SCRIPT_MAIL_URL set but APPS_SCRIPT_MAIL_SECRET missing');
+    return 'failed';
+  }
+  try {
+    // Apps Script answers POST with a 302 to script.googleusercontent.com; fetch follows it.
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret, to, subject, html, replyTo, senderName: SENDER_NAME }),
+      redirect: 'follow',
+      signal: AbortSignal.timeout(30000),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      console.error('[notify] Apps Script mailer error', res.status, data?.error);
+      return 'failed';
+    }
+    return 'sent';
+  } catch (err) {
+    console.error('[notify] Apps Script request failed', err);
+    return 'failed';
+  }
+}
+
+async function sendEmail(to: string[], subject: string, html: string, replyTo: string[] = []): Promise<EmailResult> {
   if (to.length === 0) {
     console.warn(`[notify] no recipients for "${subject}"`);
     return 'skipped';
   }
+  const scriptUrl = process.env.APPS_SCRIPT_MAIL_URL;
+  if (scriptUrl) return sendViaAppsScript(scriptUrl, to, subject, html, replyTo);
+
   const key = process.env.RESEND_API_KEY;
   if (!key) {
-    console.warn(`[notify] RESEND_API_KEY not set; email not sent: "${subject}"`);
+    console.warn(`[notify] no email transport configured; email not sent: "${subject}"`);
     return 'skipped';
   }
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: RESEND_FROM, to, subject, html }),
+      body: JSON.stringify({
+        from: `${SENDER_NAME} <${RESEND_FROM}>`, to, subject, html,
+        ...(replyTo.length ? { reply_to: replyTo } : {}),
+      }),
     });
     if (!res.ok) {
       console.error('[notify] Resend error', res.status, await res.text());
@@ -78,6 +116,7 @@ export function notifyDraftsReady(opts: {
 /** Step 2: internal approval → email the client a review link */
 export function notifyClientReview(opts: {
   to: string[]; clientName: string; postCount: number; reviewUrl: string; expiresAt: string;
+  replyTo?: string[];  // internal team member(s), so client replies reach a person
 }): Promise<EmailResult> {
   const expires = new Date(opts.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   const body = `<p>Hi ${escapeHtml(opts.clientName)} team,</p>
@@ -87,6 +126,7 @@ export function notifyClientReview(opts: {
     opts.to,
     `Please review your upcoming Facebook posts`,
     layout('Your Facebook posts are ready for review', body, opts.reviewUrl, 'Review & approve posts'),
+    opts.replyTo || [],
   );
 }
 
