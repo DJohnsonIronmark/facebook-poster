@@ -45,7 +45,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
   const recipients: string[] = batch.client?.client_reviewer_emails || [];
   const senderProblem = isAllowedSender(batch.client?.account_manager_email)
     ? null
-    : `Set an account manager (@${allowedSenderDomain()}) for this client under Client settings; client emails are sent from their mailbox.`;
+    : `Set an account manager (@${allowedSenderDomain()}) for this client under Client settings; they review drafts and client replies go to them.`;
 
   /** Atomically move the batch from one of `from` to `patch.status`; false if someone else got there first */
   const claim = async (from: string[], patch: Record<string, unknown>) => {

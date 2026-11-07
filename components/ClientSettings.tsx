@@ -78,7 +78,7 @@ function ClientRow({ client, pages, onSaved, onError }: {
     .map((p) => ({ id: p.id, label: p.location_number ? `${p.location_number} - ${p.location_name}` : p.location_name, subLabel: p.facebook_page_id }));
 
   const save = async () => {
-    if (enabled && !accountManager.trim()) { onError(`${client.name}: add the account manager before enabling (they review drafts, and client emails are sent from their mailbox).`); return; }
+    if (enabled && !accountManager.trim()) { onError(`${client.name}: add the account manager before enabling (they review drafts, and client replies go to them).`); return; }
     if (enabled && splitEmails(external).length === 0) { onError(`${client.name}: add at least one client reviewer email before enabling.`); return; }
     setSaving(true);
     const res = await fetch('/api/clients', {
@@ -106,7 +106,7 @@ function ClientRow({ client, pages, onSaved, onError }: {
           </label>
         </div>
         <label className="block text-sm">
-          <span className="text-gray-600">Account manager (reviews and approves drafts; client emails are sent from this mailbox)</span>
+          <span className="text-gray-600">Account manager (reviews and approves drafts; client replies go to this address)</span>
           <input value={accountManager} onChange={(e) => setAccountManager(e.target.value)} placeholder="am@ironmarkusa.com"
             className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-1.5" />
         </label>

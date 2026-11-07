@@ -232,7 +232,7 @@ function BatchCard({
   };
 
   const confirmText: Record<string, string> = {
-    approve_internal: `Email the review link from ${batch.client?.account_manager_email || '(no account manager set)'} to ${batch.client?.client_reviewer_emails?.join(', ') || '(no client emails configured)'}${batch.created_by_email && batch.created_by_email !== batch.client?.account_manager_email ? ` (cc ${batch.created_by_email})` : ''}?`,
+    approve_internal: `Email the review link (from the no-reply address, replies to ${batch.client?.account_manager_email || '(no account manager set)'}) to ${batch.client?.client_reviewer_emails?.join(', ') || '(no client emails configured)'}${batch.created_by_email && batch.created_by_email !== batch.client?.account_manager_email ? ` (cc ${batch.created_by_email})` : ''}?`,
     resend_link: 'Send a new link? The previous link will stop working.',
     schedule: `Schedule ${posts.length} post(s) for ${batch.client?.name}? They will publish to Facebook at their scheduled times.`,
     cancel: 'Cancel this batch? Its posts will never publish and the client link stops working.',

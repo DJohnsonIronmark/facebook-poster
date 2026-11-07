@@ -608,16 +608,18 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     };
     // Labeled TEST media served by this app (public/template-media), so previews and n8n can fetch real files
     const media = (file: string) => `${window.location.origin}/template-media/${file}`;
-    const TEST_NOTE = 'TEST ROW: real page, dated 95+ days out. Delete it from the Scheduled/Approvals tab after testing.';
+    // Example pages are deliberately fake: uploading the template unchanged reports "page not found"
+    // for every row and never creates posts on a real client page. Replace with real pages.
+    const EXAMPLE_NOTE = 'EXAMPLE ROW: replace the page with a real one from the Pages tab (or delete this row).';
     const exampleRows = [
-      ['165', 'Home Instead Clearwater', 'TEST POST, do not publish. Text + link post for {{CITY}}. Call us at {{PHONE}}.', '{{BASEURL}}', daysOut(95, 9), '', '',
-        `FRANCHISE LOCATION, text + link: location_number is matched first (name is a fallback). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. ${TEST_NOTE}`],
-      ['889', 'Home Instead Jacksonville NC', 'TEST POST, do not publish. Photo post for {{CITY}}.', '', daysOut(95, 11), 'photo', media('test-photo.jpg'),
-        `FRANCHISE LOCATION, photo: media_type=photo and media_url = a public .jpg/.png (link_url is ignored for photos). ${TEST_NOTE}`],
-      ['788', 'Home Instead Augusta, GA', 'TEST POST, do not publish. Video post for {{CITY}}.', '', daysOut(96, 9), 'video', media('test-video.mp4'),
-        `FRANCHISE LOCATION, video: media_type=video and media_url = a public .mp4. ${TEST_NOTE}`],
-      ['', 'IANA', 'TEST POST, do not publish. Text-only post for a non-franchise page.', '', daysOut(96, 11), '', '',
-        `NON-FRANCHISE PAGE: leave location_number blank and put the page name exactly as on the Pages tab. Text only = leave link_url/media blank. Skip {{CITY}}/{{PHONE}}/{{BASEURL}} unless set for the page. ${TEST_NOTE}`],
+      ['0001', 'Example Franchise Location A', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '{{BASEURL}}', daysOut(95, 9), '', '',
+        `FRANCHISE LOCATION, text + link: location_number is matched first (name is a fallback). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. ${EXAMPLE_NOTE}`],
+      ['0002', 'Example Franchise Location B', 'Photo post for {{CITY}}.', '', daysOut(95, 11), 'photo', media('test-photo.jpg'),
+        `FRANCHISE LOCATION, photo: media_type=photo and media_url = a public .jpg/.png (link_url is ignored for photos). ${EXAMPLE_NOTE}`],
+      ['0003', 'Example Franchise Location C', 'Video post for {{CITY}}.', '', daysOut(96, 9), 'video', media('test-video.mp4'),
+        `FRANCHISE LOCATION, video: media_type=video and media_url = a public .mp4. ${EXAMPLE_NOTE}`],
+      ['', 'Example Brand Page', 'Text-only post for a non-franchise page.', '', daysOut(96, 11), '', '',
+        `NON-FRANCHISE PAGE (e.g. IANA): leave location_number blank and put the page name exactly as on the Pages tab. Text only = leave link_url/media blank. Skip {{CITY}}/{{PHONE}}/{{BASEURL}} unless set for the page. ${EXAMPLE_NOTE}`],
     ];
 
     const csv = [
