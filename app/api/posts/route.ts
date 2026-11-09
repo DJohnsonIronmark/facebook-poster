@@ -4,6 +4,7 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { replacePlaceholders } from '@/lib/placeholders';
 import { UUID_RE, pageRequiresApproval } from '@/lib/review/guards';
 import { isScheduledForToday, normalizeMediaType } from '@/lib/publisher';
+import { normalizeIncomingMediaUrl, publishDraftMedia, signPostMedia } from '@/lib/media/server';
 
 // Direct (non-approval) scheduling path. All data access is server-side via the service role.
 // n8n "Facebook Daily Scheduled Publisher" publishes rows with status='pending' once scheduled_for
@@ -25,6 +26,8 @@ export async function GET() {
     console.error('posts GET', error);
     return NextResponse.json({ error: 'Failed to fetch posts' }, { status: 500 });
   }
+  // Review-workflow posts still hold private draft media until scheduled
+  await signPostMedia(supabase, data || []);
   return NextResponse.json({ posts: data });
 }
 
@@ -71,8 +74,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'n8n webhook URL not configured' }, { status: 500 });
     }
 
-    // Save first to get the post ID
+    // Direct posts schedule immediately, so uploaded (private) media is copied to the public
+    // bucket now: n8n/Facebook fetch media_url unauthenticated once the row is 'pending'.
     const supabase = createServiceClient();
+    let publicMediaUrl: string | null = null;
+    if (mediaType) {
+      const incoming = normalizeIncomingMediaUrl(media_url);
+      if (!incoming.ok) return NextResponse.json({ error: 'Invalid media_url' }, { status: 400 });
+      const published = await publishDraftMedia(supabase, incoming.value, mediaType);
+      if (!published.ok) return NextResponse.json({ error: `Media not published: ${published.error}` }, { status: 400 });
+      publicMediaUrl = published.url;
+    }
+
+    // Save first to get the post ID
     const { data: saved, error: insertErr } = await supabase
       .from('facebook_scheduled_posts')
       .insert({
@@ -84,7 +98,7 @@ export async function POST(request: NextRequest) {
         scheduled_for: scheduledIso,
         status: publish_now ? 'published' : 'pending',
         published_at: publish_now ? new Date().toISOString() : null,
-        media_url: mediaType ? media_url || null : null,
+        media_url: publicMediaUrl,
         media_type: mediaType,
       })
       .select('*')

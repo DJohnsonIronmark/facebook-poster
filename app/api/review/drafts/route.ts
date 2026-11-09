@@ -6,6 +6,7 @@ import { normalizeMediaType } from '@/lib/publisher';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { appBaseUrl, notifyDraftsReady, type EmailResult } from '@/lib/review/notify';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
+import { normalizeIncomingMediaUrl } from '@/lib/media/server';
 
 export const maxDuration = 300; // large multi-client uploads fetch link previews
 
@@ -68,8 +69,11 @@ export async function POST(request: NextRequest) {
     if (!page.client?.approval_workflow_enabled) return skipped.push({ row: index + 1, reason: 'client not enabled for approval workflow' });
     if (!content) return skipped.push({ row: index + 1, reason: 'empty post content' });
     if (content.length > MAX_POST_LENGTH) return skipped.push({ row: index + 1, reason: 'post content too long' });
+    // Uploaded media arrives as a private storage:// reference (kept private until scheduled)
+    const media = normalizeIncomingMediaUrl(row.media_url);
+    if (!media.ok) return skipped.push({ row: index + 1, reason: 'invalid media_url' });
     const entry = byClient.get(page.client.id) || { client: page.client, rows: [] };
-    entry.rows.push({ row, page, index });
+    entry.rows.push({ row: { ...row, media_url: media.value }, page, index });
     byClient.set(page.client.id, entry);
   });
 

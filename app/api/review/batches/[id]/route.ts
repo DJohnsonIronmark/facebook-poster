@@ -7,6 +7,8 @@ import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { isScheduledForToday, sendScheduledPostToWebhook } from '@/lib/publisher';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
 import { UUID_RE } from '@/lib/review/guards';
+import { createMediaPublisher, normalizeIncomingMediaUrl } from '@/lib/media/server';
+import { isStorageRef } from '@/lib/media/storageRef';
 
 export const maxDuration = 300;
 
@@ -141,9 +143,10 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
           }
         }
         if (typeof row.media_url === 'string' && post.media_type && row.media_url.trim()) {
-          const media = row.media_url.trim();
-          if (!isHttpUrl(media)) { problems.push(`Row ${i + 1}: media_url must be http(s)`); continue; }
-          if (media !== post.media_url) patch.media_url = media;
+          // A signed preview URL from the export maps back to its private ref (unchanged media)
+          const media = normalizeIncomingMediaUrl(row.media_url);
+          if (!media.ok) { problems.push(`Row ${i + 1}: media_url must be http(s)`); continue; }
+          if (media.value && media.value !== post.media_url) patch.media_url = media.value;
         }
         if (row.scheduled_for) {
           const d = new Date(row.scheduled_for);
@@ -178,27 +181,72 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         return err(`${missing.length} post(s) need a future schedule time (at least 10 minutes out): ${missing.map((p) => p.franchise_name).slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`);
       }
 
+      // Private draft media must be public before n8n/Facebook can fetch it. Copy everything
+      // first (idempotent, one copy per file) and stop before claiming if any file fails, so
+      // the batch stays client_approved and can be fixed (replace/remove the post) and retried.
+      const publishMedia = createMediaPublisher(supabase);
+      const mediaPosts = posts.filter((p) => p.status === 'client_approved' && isStorageRef(p.media_url));
+      const publicUrlById = new Map<string, string>();
+      const mediaFailures: string[] = [];
+      for (const p of mediaPosts) {
+        const res = await publishMedia(p.media_url, p.media_type);
+        if (res.ok && res.url) publicUrlById.set(p.id, res.url);
+        else mediaFailures.push(`${p.franchise_name}: ${res.ok ? 'no media' : res.error}`);
+      }
+      if (mediaFailures.length > 0) {
+        return err(`Nothing was scheduled: media for ${mediaFailures.length} post(s) could not be published (${mediaFailures.slice(0, 5).join('; ')}${mediaFailures.length > 5 ? '…' : ''}). Replace the media or remove those posts, then schedule again.`, 502);
+      }
+
       if (!(await claim(['client_approved'], { status: 'scheduled', scheduled_by_email: user.email, scheduled_at: now, client_token_hash: null }))) {
         return err('This batch was already scheduled or changed. Refresh and check.', 409);
       }
-      const { data: released, error: relErr } = await supabase
+
+      // Point each post at its public copy while it is still client_approved (never picked up by
+      // n8n); any post whose update fails is held back from release and reported.
+      const failures: string[] = [];
+      const heldBack: string[] = [];
+      for (const [postId, url] of Array.from(publicUrlById.entries())) {
+        const { data: upd, error: updErr } = await supabase
+          .from('facebook_scheduled_posts')
+          .update({ media_url: url })
+          .eq('id', postId)
+          .eq('status', 'client_approved')
+          .select('id');
+        if (updErr || (upd || []).length !== 1) {
+          heldBack.push(postId);
+          const name = posts.find((p) => p.id === postId)?.franchise_name || postId;
+          failures.push(`${name}: media not updated; post not released`);
+        }
+      }
+
+      let releaseQuery = supabase
         .from('facebook_scheduled_posts')
         .update({ status: 'pending' })
         .eq('review_batch_id', batch.id)
-        .eq('status', 'client_approved')
-        .select('*');
+        .eq('status', 'client_approved');
+      if (heldBack.length > 0) releaseQuery = releaseQuery.not('id', 'in', `(${heldBack.join(',')})`);
+      const { data: releasedRows, error: relErr } = await releaseQuery.select('*');
       if (relErr) return err('Failed to schedule posts', 500);
 
-      const failures: string[] = [];
-      for (const post of released || []) {
+      // Guard: media swapped to a new private file mid-schedule must never reach n8n as 'pending'
+      const released: any[] = [];
+      for (const post of releasedRows || []) {
+        if (!isStorageRef(post.media_url)) { released.push(post); continue; }
+        await supabase.from('facebook_scheduled_posts').update({ status: 'client_approved' }).eq('id', post.id).eq('status', 'pending');
+        failures.push(`${post.franchise_name}: media changed while scheduling; post not released`);
+      }
+
+      let webhookFailed = 0;
+      for (const post of released) {
         if (!isScheduledForToday(post.scheduled_for)) continue; // n8n daily publisher handles future days
         const res = await sendScheduledPostToWebhook(post);
         if (!res.ok) {
+          webhookFailed++;
           failures.push(`${post.franchise_name}: ${res.error}`);
           await supabase.from('facebook_scheduled_posts').update({ status: 'failed' }).eq('id', post.id);
         }
       }
-      return NextResponse.json({ success: failures.length === 0, scheduled: (released || []).length - failures.length, failures });
+      return NextResponse.json({ success: failures.length === 0, scheduled: released.length - webhookFailed, failures });
     }
 
     case 'cancel': {

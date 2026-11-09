@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { BATCH_PUBLIC_COLUMNS, POST_REVIEW_COLUMNS } from '@/lib/review/types';
+import { signPostMedia } from '@/lib/media/server';
 
 const OPEN_STATUSES = ['internal_review', 'client_review', 'client_approved'];
 
@@ -54,5 +55,7 @@ export async function GET(request: NextRequest) {
       p.client_edited = h?.clientEdited ?? false;
     }
   }
+  // Private draft media → short-lived signed URLs for previews
+  await signPostMedia(supabase, (data || []).flatMap((b: any) => b.posts || []));
   return NextResponse.json({ batches: data });
 }
