@@ -64,10 +64,24 @@ export type PublishMediaResult = { ok: true; url: string | null } | { ok: false;
  * bucket at a deterministic path, so publishing the same file for many posts copies it once.
  * http(s) URLs and null pass through unchanged.
  */
+/** Extra checks for a destination with stricter rules than Facebook (e.g. Instagram: JPEG only, ≤ 8 MB). */
+export interface PublishConstraints {
+  contentTypes?: string[];
+  maxBytes?: number;
+}
+
+/** Instagram accepts JPEG photos (≤ 8 MB) and MP4/MOV videos. */
+export function instagramPublishConstraints(mediaType: string | null | undefined): PublishConstraints {
+  return mediaType === 'video'
+    ? { contentTypes: ['video/mp4', 'video/quicktime'] }
+    : { contentTypes: ['image/jpeg'], maxBytes: 8 * 1024 * 1024 };
+}
+
 export async function publishDraftMedia(
   supabase: SupabaseClient,
   mediaUrl: string | null | undefined,
   mediaType?: string | null,
+  constraints: PublishConstraints = {},
 ): Promise<PublishMediaResult> {
   if (!mediaUrl) return { ok: true, url: null };
   const ref = parseStorageRef(mediaUrl);
@@ -86,6 +100,12 @@ export async function publishDraftMedia(
   if (!Number.isFinite(size) || size <= 0 || size > MEDIA_LIMITS[rule.kind]) return { ok: false, error: 'media file too large or empty' };
   const wanted = mediaType === 'image' ? 'photo' : mediaType;
   if (wanted && wanted !== rule.kind) return { ok: false, error: `post is ${wanted} but file is ${rule.kind}` };
+  if (constraints.contentTypes && !constraints.contentTypes.includes(contentType)) {
+    return { ok: false, error: `file type ${contentType} is not allowed here` };
+  }
+  if (constraints.maxBytes && size > constraints.maxBytes) {
+    return { ok: false, error: `file is larger than ${Math.round(constraints.maxBytes / (1024 * 1024))} MB` };
+  }
 
   const publicPath = publicPathForDraft(ref.path);
   const copy = await drafts.copy(ref.path, publicPath, { destinationBucket: PUBLIC_BUCKET });
@@ -103,11 +123,11 @@ export async function publishDraftMedia(
 /** publishDraftMedia with a per-request cache (a batch usually reuses one file across many posts). */
 export function createMediaPublisher(supabase: SupabaseClient) {
   const cache = new Map<string, Promise<PublishMediaResult>>();
-  return (mediaUrl: string | null | undefined, mediaType?: string | null) => {
-    const key = `${mediaType || ''}|${mediaUrl || ''}`;
+  return (mediaUrl: string | null | undefined, mediaType?: string | null, constraints: PublishConstraints = {}) => {
+    const key = `${mediaType || ''}|${mediaUrl || ''}|${JSON.stringify(constraints)}`;
     let pending = cache.get(key);
     if (!pending) {
-      pending = publishDraftMedia(supabase, mediaUrl, mediaType);
+      pending = publishDraftMedia(supabase, mediaUrl, mediaType, constraints);
       cache.set(key, pending);
     }
     return pending;

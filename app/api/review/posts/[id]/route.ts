@@ -4,6 +4,7 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { MAX_POST_LENGTH, POST_REVIEW_COLUMNS } from '@/lib/review/types';
 import { normalizeIncomingMediaUrl, signPostMedia } from '@/lib/media/server';
+import { attachInstagramUsernames, instagramCaptionProblem, instagramMediaProblem } from '@/lib/instagram/server';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Internal team can edit while drafts are with them, or after the client approves (final form).
@@ -30,12 +31,15 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
 
   const body = await request.json().catch(() => ({}));
   const patch: Record<string, unknown> = {};
+  const isIg = post.platform === 'instagram';
   if (typeof body.post_content === 'string') {
     const c = body.post_content.trim();
     if (!c || c.length > MAX_POST_LENGTH) return NextResponse.json({ error: 'Post content is empty or too long' }, { status: 400 });
+    const igProblem = isIg ? instagramCaptionProblem(c) : null;
+    if (igProblem) return NextResponse.json({ error: igProblem }, { status: 400 });
     patch.post_content = c;
   }
-  if (typeof body.link_url === 'string' && !post.media_type) {
+  if (typeof body.link_url === 'string' && !post.media_type && !isIg) {
     patch.link_url = body.link_url.trim() || null;
     patch.link_preview = await fetchLinkPreview(patch.link_url as string | null);
   }
@@ -44,6 +48,8 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     // URL we issued maps back to its ref (so an unchanged image isn't swapped for an expiring URL)
     const media = normalizeIncomingMediaUrl(body.media_url);
     if (!media.ok) return NextResponse.json({ error: 'Invalid media URL' }, { status: 400 });
+    const igProblem = isIg && media.value !== post.media_url ? instagramMediaProblem(post.media_type, media.value) : null;
+    if (igProblem) return NextResponse.json({ error: igProblem }, { status: 400 });
     if (media.value !== post.media_url) patch.media_url = media.value;
   }
   if (body.scheduled_for !== undefined) {
@@ -68,6 +74,7 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     });
   }
   await signPostMedia(supabase, [data]);
+  await attachInstagramUsernames(supabase, [data]);
   return NextResponse.json({ post: data });
 }
 

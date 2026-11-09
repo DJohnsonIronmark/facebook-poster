@@ -7,6 +7,9 @@ import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { appBaseUrl, notifyDraftsReady, type EmailResult } from '@/lib/review/notify';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
 import { normalizeIncomingMediaUrl } from '@/lib/media/server';
+import { normalizePlatform, type Platform } from '@/lib/instagram/rules';
+import { instagramRowProblem } from '@/lib/instagram/server';
+import { randomUUID } from 'crypto';
 
 export const maxDuration = 300; // large multi-client uploads fetch link previews
 
@@ -20,6 +23,30 @@ interface DraftRow {
   scheduled_for?: string | null;
   media_type?: string | null;
   media_url?: string | null;
+  platform?: string | null;        // 'facebook' (default) | 'instagram'
+  post_group_id?: string | null;   // same value on the FB and IG rows of one post (client-generated uuid)
+}
+
+/**
+ * Client group ids → fresh server-generated ids, so a request can never attach a post to a group
+ * that already exists. A group is only kept if all its rows are for one page with one row per platform.
+ */
+function remapGroups(rows: DraftRow[]): Map<string, string> {
+  const seen = new Map<string, { page: string; platforms: string[] }>();
+  const bad = new Set<string>();
+  for (const r of rows) {
+    const g = r.post_group_id ? String(r.post_group_id) : '';
+    if (!g) continue;
+    if (!UUID_RE.test(g)) { bad.add(g); continue; }
+    const platform = normalizePlatform(r.platform) || 'invalid';
+    const entry = seen.get(g) || { page: String(r.page_id), platforms: [] };
+    if (entry.page !== String(r.page_id) || entry.platforms.includes(platform)) bad.add(g);
+    entry.platforms.push(platform);
+    seen.set(g, entry);
+  }
+  const out = new Map<string, string>();
+  for (const g of Array.from(seen.keys())) if (!bad.has(g)) out.set(g, randomUUID());
+  return out;
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -51,7 +78,7 @@ export async function POST(request: NextRequest) {
   const pageIds = Array.from(new Set(rows.map((r) => String(r.page_id)).filter((id) => UUID_RE.test(id))));
   const { data: pages, error: pagesErr } = await supabase
     .from('facebook_pages')
-    .select('id, location_name, location_number, facebook_page_id, city, base_url, phone, client_id, client:fb_clients!client_id(*)')
+    .select('id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, client_id, client:fb_clients!client_id(*)')
     .in('id', pageIds);
   if (pagesErr) {
     console.error('drafts: pages lookup', pagesErr);
@@ -60,7 +87,8 @@ export async function POST(request: NextRequest) {
   const pageById = new Map<string, any>((pages || []).map((p: any) => [p.id, p]));
 
   const skipped: { row: number; reason: string }[] = [];
-  const byClient = new Map<string, { client: any; rows: { row: DraftRow; page: any; index: number }[] }>();
+  const byClient = new Map<string, { client: any; rows: { row: DraftRow; page: any; index: number; platform: Platform; groupId: string | null }[] }>();
+  const groupIds = remapGroups(rows);
 
   rows.forEach((row, index) => {
     const page = pageById.get(String(row.page_id));
@@ -69,11 +97,24 @@ export async function POST(request: NextRequest) {
     if (!page.client?.approval_workflow_enabled) return skipped.push({ row: index + 1, reason: 'client not enabled for approval workflow' });
     if (!content) return skipped.push({ row: index + 1, reason: 'empty post content' });
     if (content.length > MAX_POST_LENGTH) return skipped.push({ row: index + 1, reason: 'post content too long' });
+    const platform = normalizePlatform(row.platform);
+    if (!platform) return skipped.push({ row: index + 1, reason: 'platform must be facebook or instagram' });
     // Uploaded media arrives as a private storage:// reference (kept private until scheduled)
     const media = normalizeIncomingMediaUrl(row.media_url);
     if (!media.ok) return skipped.push({ row: index + 1, reason: 'invalid media_url' });
+    if (platform === 'instagram') {
+      const values = { city: page.city, franchise_name: page.location_name, location_number: page.location_number, base_url: page.base_url, phone: page.phone };
+      const problem = instagramRowProblem({
+        caption: replacePlaceholders(content, values),
+        mediaType: normalizeMediaType(row.media_type),
+        mediaUrl: media.value,
+        igUserId: page.ig_user_id,
+      });
+      if (problem) return skipped.push({ row: index + 1, reason: `Instagram: ${problem}` });
+    }
+    const groupId = row.post_group_id ? groupIds.get(String(row.post_group_id)) || null : null;
     const entry = byClient.get(page.client.id) || { client: page.client, rows: [] };
-    entry.rows.push({ row: { ...row, media_url: media.value }, page, index });
+    entry.rows.push({ row: { ...row, media_url: media.value }, page, index, platform, groupId });
     byClient.set(page.client.id, entry);
   });
 
@@ -101,13 +142,14 @@ export async function POST(request: NextRequest) {
       continue;
     }
 
-    const postRecords = await mapLimit(clientRows, 5, async ({ row, page }) => {
+    const postRecords = await mapLimit(clientRows, 5, async ({ row, page, platform, groupId }) => {
       const values = {
         city: page.city, franchise_name: page.location_name, location_number: page.location_number,
         base_url: page.base_url, phone: page.phone,
       };
       const mediaType = normalizeMediaType(row.media_type);
-      const linkUrl = mediaType ? null : replacePlaceholders(String(row.link_url || '').trim(), values) || null;
+      // Instagram has no link cards (links in captions aren't clickable)
+      const linkUrl = mediaType || platform === 'instagram' ? null : replacePlaceholders(String(row.link_url || '').trim(), values) || null;
       const scheduled = row.scheduled_for ? new Date(row.scheduled_for) : null;
       return {
         facebook_page_id: page.facebook_page_id,
@@ -121,6 +163,8 @@ export async function POST(request: NextRequest) {
         status: 'internal_review',
         review_batch_id: batch.id,
         client_id: client.id,
+        platform,
+        post_group_id: groupId,
         link_preview: linkUrl ? await previewFor(linkUrl) : null,
       };
     });

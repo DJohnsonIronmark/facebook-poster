@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { UUID_RE } from '@/lib/review/guards';
+import { mayUseFacebookWebhook } from '@/lib/instagram/release';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -32,6 +33,10 @@ export async function POST(request: NextRequest) {
         { error: post.review_batch_id ? 'This post is in the approval workflow; schedule it from Approvals once the client approves.' : `Post is ${post.status}` },
         { status: 409 }
       );
+    }
+    // This webhook publishes to Facebook; Instagram rows are left to the n8n Instagram publisher
+    if (!mayUseFacebookWebhook(post)) {
+      return NextResponse.json({ error: 'Instagram posts cannot be published from here; they publish at their scheduled time.' }, { status: 409 });
     }
 
     const webhookPayload = {

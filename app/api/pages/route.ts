@@ -3,8 +3,9 @@ import { requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { UUID_RE } from '@/lib/review/guards';
 import { TOKEN_COOKIE, cookieOptions } from '@/lib/facebook/oauth';
+import { IG_USER_ID_RE, cleanIgUsername } from '@/lib/instagram/rules';
 
-const PAGE_COLUMNS = 'id, location_name, location_number, facebook_page_id, city, base_url, phone, client_id, created_at';
+const PAGE_COLUMNS = 'id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, ig_username, client_id, created_at';
 const FB_PAGE_ID_RE = /^\d{5,25}$/;
 
 interface PageInput {
@@ -14,6 +15,8 @@ interface PageInput {
   city: string | null;
   base_url: string | null;
   phone: string | null;
+  ig_user_id: string | null;
+  ig_username: string | null;
 }
 
 const opt = (v: unknown, max: number) => {
@@ -35,7 +38,14 @@ function cleanPage(raw: any): PageInput | string {
       return 'Website must be a full URL (https://…)';
     }
   }
+  // Instagram Business/Creator account linked to the page (optional; required for Instagram posts)
+  const igUserId = String(raw?.ig_user_id ?? '').trim();
+  if (igUserId && !IG_USER_ID_RE.test(igUserId)) return 'Instagram account ID must be the numeric ID (5–25 digits)';
+  const igUsername = cleanIgUsername(raw?.ig_username);
+  if (igUsername === null) return 'Instagram username can only use letters, numbers, periods and underscores (max 30)';
   return {
+    ig_user_id: igUserId || null,
+    ig_username: igUsername || null,
     facebook_page_id: id,
     location_name: name,
     location_number: opt(raw?.location_number, 40),
@@ -137,7 +147,10 @@ export async function PATCH(request: NextRequest) {
 
   const { data, error } = await supabase
     .from('facebook_pages')
-    .update({ location_name: r.location_name, location_number: r.location_number, city: r.city, base_url: r.base_url, phone: r.phone })
+    .update({
+      location_name: r.location_name, location_number: r.location_number, city: r.city, base_url: r.base_url, phone: r.phone,
+      ig_user_id: r.ig_user_id, ig_username: r.ig_username,
+    })
     .eq('id', id)
     .select(PAGE_COLUMNS)
     .single();

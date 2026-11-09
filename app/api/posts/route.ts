@@ -4,7 +4,10 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { replacePlaceholders } from '@/lib/placeholders';
 import { UUID_RE, pageRequiresApproval } from '@/lib/review/guards';
 import { isScheduledForToday, normalizeMediaType } from '@/lib/publisher';
-import { normalizeIncomingMediaUrl, publishDraftMedia, signPostMedia } from '@/lib/media/server';
+import { instagramPublishConstraints, normalizeIncomingMediaUrl, publishDraftMedia, signPostMedia } from '@/lib/media/server';
+import { normalizePlatform } from '@/lib/instagram/rules';
+import { directPostDecision } from '@/lib/instagram/release';
+import { instagramPublishingEnabled, instagramRowProblem } from '@/lib/instagram/server';
 
 // Direct (non-approval) scheduling path. All data access is server-side via the service role.
 // n8n "Facebook Daily Scheduled Publisher" publishes rows with status='pending' once scheduled_for
@@ -52,6 +55,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Instagram: refused while INSTAGRAM_PUBLISHING_ENABLED is off; never "publish now"; never the
+    // Facebook webhook (lib/instagram/release.ts)
+    const platform = normalizePlatform(body.platform);
+    if (!platform) return NextResponse.json({ error: 'platform must be facebook or instagram' }, { status: 400 });
+    const decision = directPostDecision({ platform, publishNow: !!publish_now, instagramEnabled: instagramPublishingEnabled() });
+    if (!decision.ok) return NextResponse.json({ error: decision.error }, { status: decision.status });
+    const postGroupId = body.post_group_id ? String(body.post_group_id) : null;
+    if (postGroupId && !UUID_RE.test(postGroupId)) return NextResponse.json({ error: 'Invalid post_group_id' }, { status: 400 });
+
     const placeholderValues = {
       city: city || '',
       franchise_name: franchise_name || '',
@@ -61,7 +73,7 @@ export async function POST(request: NextRequest) {
     };
     const mediaType = normalizeMediaType(body.media_type);
     const processedContent = replacePlaceholders(post_content, placeholderValues);
-    const processedLinkUrl = mediaType ? '' : replacePlaceholders(link_url || '', placeholderValues);
+    const processedLinkUrl = mediaType || platform === 'instagram' ? '' : replacePlaceholders(link_url || '', placeholderValues);
 
     let scheduledIso: string | null = null;
     if (scheduled_for && !publish_now) {
@@ -69,7 +81,10 @@ export async function POST(request: NextRequest) {
       if (isNaN(d.getTime())) return NextResponse.json({ error: 'Invalid schedule date' }, { status: 400 });
       scheduledIso = d.toISOString();
     }
-    const viaWebhook = !!publish_now || isScheduledForToday(scheduledIso);
+    if (platform === 'instagram' && !scheduledIso) {
+      return NextResponse.json({ error: 'Instagram posts need a schedule date' }, { status: 400 });
+    }
+    const viaWebhook = decision.useWebhookIfSameDay && (!!publish_now || isScheduledForToday(scheduledIso));
     if (viaWebhook && !N8N_WEBHOOK_URL) {
       return NextResponse.json({ error: 'n8n webhook URL not configured' }, { status: 500 });
     }
@@ -77,11 +92,21 @@ export async function POST(request: NextRequest) {
     // Direct posts schedule immediately, so uploaded (private) media is copied to the public
     // bucket now: n8n/Facebook fetch media_url unauthenticated once the row is 'pending'.
     const supabase = createServiceClient();
+    const incoming = normalizeIncomingMediaUrl(media_url);
+    if (mediaType && !incoming.ok) return NextResponse.json({ error: 'Invalid media_url' }, { status: 400 });
+    if (platform === 'instagram') {
+      const { data: igPages } = await supabase
+        .from('facebook_pages').select('ig_user_id').eq('facebook_page_id', String(facebook_page_id));
+      const igUserId = (igPages || []).map((p: { ig_user_id: string | null }) => p.ig_user_id).find(Boolean) || null;
+      const problem = instagramRowProblem({
+        caption: processedContent, mediaType, mediaUrl: incoming.ok ? incoming.value : null, igUserId,
+      });
+      if (problem) return NextResponse.json({ error: `Instagram: ${problem}` }, { status: 400 });
+    }
     let publicMediaUrl: string | null = null;
-    if (mediaType) {
-      const incoming = normalizeIncomingMediaUrl(media_url);
-      if (!incoming.ok) return NextResponse.json({ error: 'Invalid media_url' }, { status: 400 });
-      const published = await publishDraftMedia(supabase, incoming.value, mediaType);
+    if (mediaType && incoming.ok) {
+      const constraints = platform === 'instagram' ? instagramPublishConstraints(mediaType) : {};
+      const published = await publishDraftMedia(supabase, incoming.value, mediaType, constraints);
       if (!published.ok) return NextResponse.json({ error: `Media not published: ${published.error}` }, { status: 400 });
       publicMediaUrl = published.url;
     }
@@ -100,6 +125,8 @@ export async function POST(request: NextRequest) {
         published_at: publish_now ? new Date().toISOString() : null,
         media_url: publicMediaUrl,
         media_type: mediaType,
+        platform,
+        post_group_id: postGroupId,
       })
       .select('*')
       .single();

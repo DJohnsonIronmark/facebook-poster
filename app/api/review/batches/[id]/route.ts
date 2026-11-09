@@ -5,9 +5,11 @@ import { generateReviewToken } from '@/lib/review/tokens';
 import { allowedSenderDomain, appBaseUrl, isAllowedSender, notifyClientReview } from '@/lib/review/notify';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { isScheduledForToday, sendScheduledPostToWebhook } from '@/lib/publisher';
+import { planScheduleRelease, shouldSendSameDay } from '@/lib/instagram/release';
+import { instagramCaptionProblem, instagramMediaProblem, instagramPublishingEnabled } from '@/lib/instagram/server';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
 import { UUID_RE } from '@/lib/review/guards';
-import { createMediaPublisher, normalizeIncomingMediaUrl } from '@/lib/media/server';
+import { createMediaPublisher, instagramPublishConstraints, normalizeIncomingMediaUrl } from '@/lib/media/server';
 import { isStorageRef } from '@/lib/media/storageRef';
 
 export const maxDuration = 300;
@@ -129,8 +131,11 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         if (post.status !== 'client_approved') { problems.push(`Row ${i + 1}: post is ${post.status}`); continue; }
 
         const patch: Record<string, unknown> = {};
+        const isIg = post.platform === 'instagram';
         if (typeof row.post_content === 'string' && row.post_content.trim()) {
           if (row.post_content.length > MAX_POST_LENGTH) { problems.push(`Row ${i + 1}: content too long`); continue; }
+          const igProblem = isIg ? instagramCaptionProblem(row.post_content.trim()) : null;
+          if (igProblem) { problems.push(`Row ${i + 1}: ${igProblem}`); continue; }
           if (row.post_content.trim() !== post.post_content) patch.post_content = row.post_content.trim();
         }
         if (typeof row.link_url === 'string' && !post.media_type) {
@@ -146,7 +151,11 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
           // A signed preview URL from the export maps back to its private ref (unchanged media)
           const media = normalizeIncomingMediaUrl(row.media_url);
           if (!media.ok) { problems.push(`Row ${i + 1}: media_url must be http(s)`); continue; }
-          if (media.value && media.value !== post.media_url) patch.media_url = media.value;
+          if (media.value && media.value !== post.media_url) {
+            const igProblem = isIg ? instagramMediaProblem(post.media_type, media.value) : null;
+            if (igProblem) { problems.push(`Row ${i + 1}: ${igProblem}`); continue; }
+            patch.media_url = media.value;
+          }
         }
         if (row.scheduled_for) {
           const d = new Date(row.scheduled_for);
@@ -175,8 +184,21 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     case 'schedule': {
       if (batch.status !== 'client_approved') return err('Only client-approved batches can be scheduled', 409);
       if (posts.length === 0) return err('Batch has no posts');
+
+      // HARD SAFETY RULE (lib/instagram/release.ts): with Instagram publishing off, Instagram rows
+      // stay client_approved and the batch stays in "Ready to post"; only Facebook rows are released.
+      const igEnabled = instagramPublishingEnabled();
+      const plan = planScheduleRelease(posts, igEnabled);
+      const igHeldMessage = plan.heldInstagram.length > 0
+        ? `${plan.heldInstagram.length} Instagram post(s) not scheduled: Instagram publishing not enabled yet. They stay in Ready to post.`
+        : null;
+      if (plan.release.length === 0) {
+        return err(igHeldMessage || 'No approved posts left to schedule', 409);
+      }
+      const toRelease = posts.filter((p) => plan.release.includes(p.id));
+
       const minMs = Date.now() + 10 * 60 * 1000; // Facebook needs scheduled times ≥10 min out
-      const missing = posts.filter((p) => !p.scheduled_for || new Date(p.scheduled_for).getTime() < minMs);
+      const missing = toRelease.filter((p) => !p.scheduled_for || new Date(p.scheduled_for).getTime() < minMs);
       if (missing.length > 0) {
         return err(`${missing.length} post(s) need a future schedule time (at least 10 minutes out): ${missing.map((p) => p.franchise_name).slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`);
       }
@@ -185,13 +207,14 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       // first (idempotent, one copy per file) and stop before claiming if any file fails, so
       // the batch stays client_approved and can be fixed (replace/remove the post) and retried.
       const publishMedia = createMediaPublisher(supabase);
-      const mediaPosts = posts.filter((p) => p.status === 'client_approved' && isStorageRef(p.media_url));
+      const mediaPosts = toRelease.filter((p) => isStorageRef(p.media_url));
       const publicUrlById = new Map<string, string>();
       const mediaFailures: string[] = [];
       for (const p of mediaPosts) {
-        const res = await publishMedia(p.media_url, p.media_type);
+        const isIg = p.platform === 'instagram';
+        const res = await publishMedia(p.media_url, p.media_type, isIg ? instagramPublishConstraints(p.media_type) : {});
         if (res.ok && res.url) publicUrlById.set(p.id, res.url);
-        else mediaFailures.push(`${p.franchise_name}: ${res.ok ? 'no media' : res.error}`);
+        else mediaFailures.push(`${p.franchise_name}${isIg ? ' (Instagram)' : ''}: ${res.ok ? 'no media' : res.error}`);
       }
       if (mediaFailures.length > 0) {
         return err(`Nothing was scheduled: media for ${mediaFailures.length} post(s) could not be published (${mediaFailures.slice(0, 5).join('; ')}${mediaFailures.length > 5 ? '…' : ''}). Replace the media or remove those posts, then schedule again.`, 502);
@@ -219,26 +242,39 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         }
       }
 
-      let releaseQuery = supabase
-        .from('facebook_scheduled_posts')
-        .update({ status: 'pending' })
-        .eq('review_batch_id', batch.id)
-        .eq('status', 'client_approved');
-      if (heldBack.length > 0) releaseQuery = releaseQuery.not('id', 'in', `(${heldBack.join(',')})`);
-      const { data: releasedRows, error: relErr } = await releaseQuery.select('*');
-      if (relErr) return err('Failed to schedule posts', 500);
-
-      // Guard: media swapped to a new private file mid-schedule must never reach n8n as 'pending'
-      const released: any[] = [];
-      for (const post of releasedRows || []) {
-        if (!isStorageRef(post.media_url)) { released.push(post); continue; }
-        await supabase.from('facebook_scheduled_posts').update({ status: 'client_approved' }).eq('id', post.id).eq('status', 'pending');
-        failures.push(`${post.franchise_name}: media changed while scheduling; post not released`);
+      // Release ONLY the planned rows (never batch-wide: held Instagram rows must stay out of 'pending')
+      const releaseIds = plan.release.filter((id) => !heldBack.includes(id));
+      let releasedRows: any[] = [];
+      if (releaseIds.length > 0) {
+        const { data, error: relErr } = await supabase
+          .from('facebook_scheduled_posts')
+          .update({ status: 'pending' })
+          .eq('review_batch_id', batch.id)
+          .eq('status', 'client_approved')
+          .in('id', releaseIds)
+          .select('*');
+        if (relErr) {
+          await supabase.from('fb_review_batches').update({ status: 'client_approved', updated_at: now }).eq('id', batch.id).eq('status', 'scheduled');
+          return err('Failed to schedule posts', 500);
+        }
+        releasedRows = data || [];
       }
 
+      // Guards before anything can reach n8n:
+      //  * media swapped to a new private file mid-schedule must never be 'pending'
+      //  * an Instagram row must never be 'pending' while Instagram publishing is off
+      const released: any[] = [];
+      for (const post of releasedRows) {
+        const igBlocked = post.platform === 'instagram' && !igEnabled;
+        if (!isStorageRef(post.media_url) && !igBlocked) { released.push(post); continue; }
+        await supabase.from('facebook_scheduled_posts').update({ status: 'client_approved' }).eq('id', post.id).eq('status', 'pending');
+        failures.push(`${post.franchise_name}: ${igBlocked ? 'Instagram publishing not enabled' : 'media changed while scheduling'}; post not released`);
+      }
+
+      // Same-day posts go to the Facebook webhook: Facebook rows only, never Instagram
       let webhookFailed = 0;
       for (const post of released) {
-        if (!isScheduledForToday(post.scheduled_for)) continue; // n8n daily publisher handles future days
+        if (!shouldSendSameDay(post, isScheduledForToday(post.scheduled_for))) continue; // n8n daily publisher handles the rest
         const res = await sendScheduledPostToWebhook(post);
         if (!res.ok) {
           webhookFailed++;
@@ -246,14 +282,37 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
           await supabase.from('facebook_scheduled_posts').update({ status: 'failed' }).eq('id', post.id);
         }
       }
-      return NextResponse.json({ success: failures.length === 0, scheduled: released.length - webhookFailed, failures });
+
+      // Anything still waiting (held Instagram rows, rows that failed to release) keeps the batch
+      // in Ready to post so it can be scheduled again; re-scheduling only touches client_approved rows.
+      const { count: stillApproved } = await supabase
+        .from('facebook_scheduled_posts')
+        .select('id', { count: 'exact', head: true })
+        .eq('review_batch_id', batch.id)
+        .eq('status', 'client_approved');
+      const batchStatus = (stillApproved || 0) > 0 ? 'client_approved' : 'scheduled';
+      if (batchStatus === 'client_approved') {
+        await supabase.from('fb_review_batches').update({ status: 'client_approved', updated_at: now }).eq('id', batch.id).eq('status', 'scheduled');
+      }
+
+      return NextResponse.json({
+        success: failures.length === 0,
+        scheduled: released.length - webhookFailed,
+        instagram_held: plan.heldInstagram.length,
+        instagram_message: igHeldMessage,
+        batch_status: batchStatus,
+        failures,
+      });
     }
 
     case 'cancel': {
       if (!(await claim(['internal_review', 'client_review', 'client_approved'], { status: 'cancelled', client_token_hash: null }))) {
         return err('Batch already scheduled or cancelled; delete individual posts from the Scheduled tab instead', 409);
       }
-      return NextResponse.json({ success: true });
+      // A batch kept in Ready to post for held Instagram rows may already have released Facebook
+      // rows; cancelling does not unschedule those (delete them from the Scheduled tab).
+      const alreadyScheduled = posts.filter((p) => p.status === 'pending').length;
+      return NextResponse.json({ success: true, already_scheduled: alreadyScheduled });
     }
 
     default:
