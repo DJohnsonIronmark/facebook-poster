@@ -6,6 +6,28 @@ import DeviceToggle from './DeviceToggle';
 import ClientSettings from './ClientSettings';
 import type { ReviewBatch, ReviewPost } from '@/lib/review/types';
 import { downloadCSV, formatScheduledDate, parseCSVObjects, parseScheduledDate, toCSV } from '@/lib/csv';
+import {
+  type ComposeEmail, clientReviewEmail, draftsReadyEmail, mailtoUrl, outlookComposeUrl, readyToPostEmail,
+} from '@/lib/review/composeEmail';
+
+/** "Send from Outlook" (Option A): opens a pre-filled email in the user's own mailbox. */
+function ComposeButtons({ email, label }: { email: ComposeEmail; label: string }) {
+  if (email.to.length === 0) {
+    return <span className="text-xs text-gray-500">No recipients set. Add them under Client settings.</span>;
+  }
+  return (
+    <span className="inline-flex items-center gap-1">
+      <a href={outlookComposeUrl(email)} target="_blank" rel="noopener noreferrer"
+        title={`To: ${email.to.join(', ')}${email.cc.length ? ` · Cc: ${email.cc.join(', ')}` : ''}`}
+        className="px-3 py-1.5 text-sm rounded-lg bg-[#0f6cbd] text-white hover:bg-[#115ea3]">
+        {label}
+      </a>
+      <a href={mailtoUrl(email)} className="px-2 py-1.5 text-xs rounded-lg text-gray-600 hover:bg-gray-100" title="Open in your default mail app instead">
+        Mail app
+      </a>
+    </span>
+  );
+}
 
 type Stage = 'internal_review' | 'client_review' | 'client_approved';
 
@@ -30,7 +52,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
   const [stage, setStage] = useState<Stage>('internal_review');
   const [openId, setOpenId] = useState<string | null>(null);
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop');
-  const [banner, setBanner] = useState<{ kind: 'ok' | 'error'; text: string; link?: string } | null>(null);
+  const [banner, setBanner] = useState<{ kind: 'ok' | 'error'; text: string; link?: string; compose?: ComposeEmail } | null>(null);
   const [showClients, setShowClients] = useState(false);
   const finalInputRef = useRef<HTMLInputElement>(null);
 
@@ -71,8 +93,6 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
     return data;
   };
 
-  const emailNote = (email?: string) =>
-    email === 'sent' ? 'Email sent.' : email === 'skipped' ? 'Email NOT sent (email not configured) — copy the link below and send it yourself.' : 'Email FAILED — copy the link below and send it yourself.';
 
   // ---------- final-form bulk export / upload across all client-approved batches ----------
   const exportFinal = () => {
@@ -150,7 +170,13 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
           {banner.link && (
             <div className="mt-2 flex gap-2 items-center">
               <input readOnly value={banner.link} className="flex-1 border rounded px-2 py-1 text-xs font-mono bg-white text-gray-800" onFocus={(e) => e.target.select()} />
-              <button onClick={() => navigator.clipboard.writeText(banner.link!)} className="px-2 py-1 text-xs rounded bg-white border">Copy</button>
+              <button onClick={() => { if (banner.link) navigator.clipboard.writeText(banner.link); }} className="px-2 py-1 text-xs rounded bg-white border">Copy</button>
+            </div>
+          )}
+          {banner.compose && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <ComposeButtons email={banner.compose} label="Email client from Outlook" />
+              <span className="text-xs text-gray-600">Opens a ready-to-send email from your own mailbox.</span>
             </div>
           )}
         </div>
@@ -183,13 +209,31 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
             onToggle={() => setOpenId(openId === batch.id ? null : batch.id)}
             device={device}
             canEdit={canEdit}
+            isAccountManager={!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase()}
             canApproveForClient={isAdmin || (!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase())}
             onChanged={load}
             onAction={async (action) => {
               const data = await act(batch, action);
               if (!data) return;
               if (action === 'approve_internal' || action === 'resend_link') {
-                setBanner({ kind: data.email === 'sent' ? 'ok' : 'error', text: `${batch.name} sent to client. ${emailNote(data.email)}`, link: data.review_url });
+                setBanner({
+                  kind: 'ok',
+                  text: data.email === 'sent'
+                    ? `${batch.name} is with the client. The review email was sent automatically.`
+                    : `${batch.name} is with the client. Send them the review link: use "Email client from Outlook" below, or copy the link.`,
+                  link: data.review_url,
+                  compose: data.review_url
+                    ? clientReviewEmail({
+                        clientEmails: batch.client?.client_reviewer_emails || [],
+                        accountManager: batch.client?.account_manager_email,
+                        uploadedBy: batch.created_by_email,
+                        clientName: batch.client?.name || 'Client',
+                        postCount: batch.posts?.length || 0,
+                        reviewUrl: data.review_url,
+                        expiresAt: data.expires_at,
+                      })
+                    : undefined,
+                });
               } else if (action === 'schedule') {
                 setBanner({
                   kind: data.failures?.length ? 'error' : 'ok',
@@ -211,9 +255,10 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
 // ---------------------------------------------------------------------------------------
 
 function BatchCard({
-  batch, open, onToggle, device, canEdit, canApproveForClient, onChanged, onAction,
+  batch, open, onToggle, device, canEdit, canApproveForClient, isAccountManager, onChanged, onAction,
 }: {
-  batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean; canApproveForClient: boolean;
+  batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean;
+  canApproveForClient: boolean; isAccountManager: boolean;
   onChanged: () => void; onAction: (action: string) => Promise<void>;
 }) {
   const [confirm, setConfirm] = useState<string | null>(null);
@@ -269,6 +314,26 @@ function BatchCard({
               </>
             ) : (
               <>
+                {batch.status === 'internal_review' && !isAccountManager && (
+                  <ComposeButtons label="Notify account manager" email={draftsReadyEmail({
+                    accountManager: batch.client?.account_manager_email,
+                    uploadedBy: batch.created_by_email,
+                    clientName: batch.client?.name || 'Client',
+                    batchName: batch.name,
+                    postCount: posts.length,
+                    appUrl: window.location.origin,
+                  })} />
+                )}
+                {batch.status === 'client_approved' && (
+                  <ComposeButtons label="Send ready-to-post email" email={readyToPostEmail({
+                    clientEmails: batch.client?.client_reviewer_emails || [],
+                    accountManager: batch.client?.account_manager_email,
+                    uploadedBy: batch.created_by_email,
+                    clientName: batch.client?.name || 'Client',
+                    approvedBy: batch.client_approved_by,
+                    posts,
+                  })} />
+                )}
                 {batch.status === 'internal_review' && (canApproveForClient ? (
                   <button onClick={() => setConfirm('approve_internal')} className="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">
                     Approve → send to client
