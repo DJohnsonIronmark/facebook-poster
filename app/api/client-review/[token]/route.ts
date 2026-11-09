@@ -3,6 +3,7 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { hashReviewToken, isWellFormedToken } from '@/lib/review/tokens';
 import { appBaseUrl, notifyReadyToPost } from '@/lib/review/notify';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
+import { signPostMedia } from '@/lib/media/server';
 
 // PUBLIC (no login): the magic-link token is the credential. Everything is scoped to the
 // single batch whose token hash matches; only post text and a comment can be changed.
@@ -28,8 +29,11 @@ const notFound = () =>
   NextResponse.json({ error: 'This review link is invalid or has expired. Please contact your Ironmark team for a new link.' }, { status: 404 });
 
 export async function GET(_request: NextRequest, { params }: { params: { token: string } }) {
-  const { batch } = await resolveBatch(params.token);
-  if (!batch) return notFound();
+  const { supabase, batch } = await resolveBatch(params.token);
+  if (!batch || !supabase) return notFound();
+  // Draft media is private; the token-gated page gets short-lived signed URLs (never the bucket path)
+  await signPostMedia(supabase, batch.posts || []);
+  for (const p of batch.posts || []) delete p.media_storage_ref;
   batch.posts?.sort((a: any, b: any) =>
     (a.scheduled_for || '').localeCompare(b.scheduled_for || '') || a.franchise_name.localeCompare(b.franchise_name));
   return NextResponse.json(

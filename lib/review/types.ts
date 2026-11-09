@@ -24,7 +24,8 @@ export interface ReviewPost {
   location_number: string | null;
   post_content: string;
   link_url: string | null;
-  media_url: string | null;
+  media_url: string | null;          // display URL (private draft media arrives as a short-lived signed URL)
+  media_storage_ref?: string | null; // storage://facebook-media-drafts/... when media_url was signed from a private draft
   media_type: string | null;
   scheduled_for: string | null;
   status: string;

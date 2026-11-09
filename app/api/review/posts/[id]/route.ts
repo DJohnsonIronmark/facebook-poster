@@ -3,6 +3,7 @@ import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { MAX_POST_LENGTH, POST_REVIEW_COLUMNS } from '@/lib/review/types';
+import { normalizeIncomingMediaUrl, signPostMedia } from '@/lib/media/server';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Internal team can edit while drafts are with them, or after the client approves (final form).
@@ -38,7 +39,13 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     patch.link_url = body.link_url.trim() || null;
     patch.link_preview = await fetchLinkPreview(patch.link_url as string | null);
   }
-  if (typeof body.media_url === 'string' && post.media_type && body.media_url.trim()) patch.media_url = body.media_url.trim();
+  if (typeof body.media_url === 'string' && post.media_type && body.media_url.trim()) {
+    // Accepts an http(s) URL or a storage:// ref from /api/media/upload-urls; a signed preview
+    // URL we issued maps back to its ref (so an unchanged image isn't swapped for an expiring URL)
+    const media = normalizeIncomingMediaUrl(body.media_url);
+    if (!media.ok) return NextResponse.json({ error: 'Invalid media URL' }, { status: 400 });
+    if (media.value !== post.media_url) patch.media_url = media.value;
+  }
   if (body.scheduled_for !== undefined) {
     if (body.scheduled_for === null || body.scheduled_for === '') patch.scheduled_for = null;
     else {
@@ -60,6 +67,7 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
       post_id: post.id, stage: 'internal_edit', post_content: data.post_content, link_url: data.link_url, media_url: data.media_url, edited_by: user.email,
     });
   }
+  await signPostMedia(supabase, [data]);
   return NextResponse.json({ post: data });
 }
 

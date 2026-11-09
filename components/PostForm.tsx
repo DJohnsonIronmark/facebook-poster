@@ -1,10 +1,12 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import type { FacebookPage } from '@/app/page';
 import SearchableMultiSelect from './SearchableMultiSelect';
 import FacebookPostPreview from './FacebookPostPreview';
 import { replacePlaceholders } from '@/lib/placeholders';
+import { ACCEPT_MEDIA, MEDIA_HELP, baseName, fileExtension, mapRowsToFiles, validateMediaFile, type RowMediaStatus } from '@/lib/media/mapping';
+import { uploadMediaFiles } from '@/lib/media/upload';
 
 interface PostFormProps {
   pages: FacebookPage[];
@@ -43,7 +45,19 @@ interface CSVRow {
   link_url: string;
   scheduled_for: string;
   media_type: string;
+  media_file: string;
   media_url: string;
+}
+
+const MEDIA_FILE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov'];
+const isCsvFile = (f: File) => fileExtension(f.name) === 'csv' || f.type === 'text/csv';
+const isMediaCandidate = (f: File) => f.type.startsWith('image/') || f.type.startsWith('video/') || MEDIA_FILE_EXTS.includes(fileExtension(f.name));
+
+function mediaStatusLabel(s: RowMediaStatus): string {
+  if (s.state === 'none') return 'text';
+  if (s.state === 'url') return `${s.kind} (URL)`;
+  if (s.state === 'file') return s.kind;
+  return s.message;
 }
 
 export default function PostForm({ pages, onPostCreated }: PostFormProps) {
@@ -63,8 +77,14 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [mediaInputMode, setMediaInputMode] = useState<'url' | 'file'>('file');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  // storage:// ref of selectedFile once uploaded (private drafts bucket; made public on schedule)
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  // Bulk: media files dropped alongside the CSV, mapped to rows by the media_file column
+  const [mediaFiles, setMediaFiles] = useState<File[]>([]);
+  const [mediaObjectUrls, setMediaObjectUrls] = useState<string[]>([]);
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [isDraggingCSV, setIsDraggingCSV] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaFileInputRef = useRef<HTMLInputElement>(null);
@@ -78,6 +98,20 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       .then((d) => setApprovalClientIds(new Set((d.clients || []).filter((c: any) => c.approval_workflow_enabled).map((c: any) => c.id))))
       .catch(() => {});
   }, []);
+
+  // Local object URLs so previews show the real files before anything is uploaded
+  useEffect(() => {
+    const urls = mediaFiles.map((f) => URL.createObjectURL(f));
+    setMediaObjectUrls(urls);
+    return () => urls.forEach((u) => URL.revokeObjectURL(u));
+  }, [mediaFiles]);
+
+  useEffect(() => {
+    if (!selectedFile) { setPreviewUrl(null); return; }
+    const url = URL.createObjectURL(selectedFile);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [selectedFile]);
 
   const needsApproval = (page: FacebookPage | null | undefined) =>
     !!page?.client_id && approvalClientIds.has(page.client_id);
@@ -103,79 +137,79 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     e.stopPropagation();
     setIsDraggingCSV(false);
 
-    const files = e.dataTransfer.files;
-    if (files && files.length > 0) {
-      const file = files[0];
-      if (file.name.endsWith('.csv')) {
-        // Create a synthetic event to reuse handleFileUpload
-        const syntheticEvent = {
-          target: { files: [file] }
-        } as unknown as React.ChangeEvent<HTMLInputElement>;
-        handleFileUpload(syntheticEvent);
-      } else {
-        setCsvError('Please drop a CSV file');
+    handleBulkFiles(Array.from(e.dataTransfer.files || []));
+  };
+
+  // Bulk: accept the CSV and any number of media files together (in one or several drops)
+  const handleBulkFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+    setCsvError(null);
+    setBulkNotice(null);
+    const csvFiles = files.filter(isCsvFile);
+    const media = files.filter((f) => !isCsvFile(f) && isMediaCandidate(f));
+    const other = files.filter((f) => !isCsvFile(f) && !isMediaCandidate(f));
+    const notes: string[] = [];
+    if (other.some((f) => fileExtension(f.name) === 'zip')) {
+      notes.push('ZIP files are not supported: unzip it and drop the CSV and media files together.');
+    }
+    const otherNames = other.filter((f) => fileExtension(f.name) !== 'zip').map((f) => f.name);
+    if (otherNames.length) notes.push(`Ignored (not a CSV, image or video): ${otherNames.slice(0, 5).join(', ')}${otherNames.length > 5 ? '…' : ''}`);
+
+    if (csvFiles.length > 1) {
+      setCsvError('Drop one CSV at a time');
+    } else if (csvFiles.length === 1) {
+      try {
+        const rows = parseCSV(await csvFiles[0].text());
+        if (rows.length === 0) setCsvError('CSV file is empty or has no valid data rows');
+        else setCsvData(rows);
+      } catch (err) {
+        setCsvError(err instanceof Error ? err.message : 'Failed to parse CSV');
       }
     }
+
+    if (media.length > 0) {
+      // Same file name again (any case) replaces the earlier file
+      setMediaFiles((prev) => {
+        const incoming = new Set(media.map((f) => baseName(f.name).toLowerCase()));
+        return [...prev.filter((f) => !incoming.has(baseName(f.name).toLowerCase())), ...media];
+      });
+    }
+    setBulkNotice(notes.length ? notes.join(' ') : null);
   };
+
+  const removeMediaFile = (index: number) => setMediaFiles((prev) => prev.filter((_, i) => i !== index));
 
   // Handle media file selection
   const handleMediaFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validate file type based on selected media type
-    const isPhoto = file.type.startsWith('image/');
-    const isVideo = file.type.startsWith('video/');
-
-    if (mediaType === 'photo' && !isPhoto) {
-      setError('Please select an image file (JPG, PNG, GIF, WEBP)');
+    const check = validateMediaFile(file);
+    if (!check.ok) {
+      setError(check.message);
       return;
     }
-    if (mediaType === 'video' && !isVideo) {
-      setError('Please select a video file (MP4, MOV, AVI, WMV)');
+    if (check.kind !== mediaType) {
+      setError(mediaType === 'photo' ? 'Please select an image file (JPG, PNG, GIF, WEBP)' : 'Please select a video file (MP4, MOV)');
       return;
     }
 
     setSelectedFile(file);
     setUploadedUrl(null);
     setError(null);
-
-    // Create preview for images
-    if (isPhoto) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setPreviewUrl(event.target?.result as string);
-      };
-      reader.readAsDataURL(file);
-    } else {
-      setPreviewUrl(null);
-    }
   };
 
-  // Upload file to Supabase Storage
-  const uploadFile = async (): Promise<string | null> => {
+  // Upload straight to Supabase Storage (private drafts bucket) via a signed upload URL
+  const uploadFile = async (purpose: 'draft' | 'direct'): Promise<string | null> => {
     if (!selectedFile) return null;
 
     setUploading(true);
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to upload file');
-      }
-
-      setUploadedUrl(data.url);
-      return data.url;
+      const [ref] = await uploadMediaFiles([selectedFile], purpose);
+      setUploadedUrl(ref);
+      return ref;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to upload file');
       return null;
@@ -188,7 +222,6 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const clearMediaSelection = () => {
     setSelectedFile(null);
     setUploadedUrl(null);
-    setPreviewUrl(null);
     setMediaUrl('');
     if (mediaFileInputRef.current) {
       mediaFileInputRef.current.value = '';
@@ -215,7 +248,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         if (mediaInputMode === 'file') {
           if (selectedFile && !uploadedUrl) {
             // Upload file first
-            finalMediaUrl = await uploadFile();
+            finalMediaUrl = await uploadFile(selectedPages.some(needsApproval) ? 'draft' : 'direct');
             if (!finalMediaUrl) {
               throw new Error('Failed to upload media file');
             }
@@ -302,7 +335,6 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       setMediaInputMode('file');
       setSelectedFile(null);
       setUploadedUrl(null);
-      setPreviewUrl(null);
       if (mediaFileInputRef.current) {
         mediaFileInputRef.current.value = '';
       }
@@ -333,6 +365,25 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     return !!p?.client_id && approvalClientIds.has(p.client_id);
   }).length;
 
+  // Row ↔ file mapping (media_file column), recomputed as rows/files change
+  const mediaMapping = useMemo(() => mapRowsToFiles(csvData, mediaFiles), [csvData, mediaFiles]);
+  const mediaErrorRows = mediaMapping.rows
+    .map((s, i) => (s.state === 'error' ? i : -1))
+    .filter((i) => i >= 0);
+
+  const removeErroredRows = () => {
+    const bad = new Set(mediaErrorRows);
+    setCsvData((rows) => rows.filter((_, i) => !bad.has(i)));
+  };
+
+  const clearBulk = () => {
+    setCsvData([]);
+    setMediaFiles([]);
+    setCsvError(null);
+    setBulkNotice(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   const handleBulkSubmit = async () => {
     setError(null);
     setSuccess(null);
@@ -342,18 +393,48 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       if (csvData.length === 0) {
         throw new Error('No CSV data to upload');
       }
+      const statuses = mediaMapping.rows;
+      if (statuses.some((s) => s.state === 'error')) {
+        throw new Error('Fix or remove the rows with media problems first');
+      }
+
+      // Upload each referenced file once (rows for unknown pages are skipped), straight to storage
+      const neededFiles = Array.from(new Set(
+        csvData.flatMap((row, i) => {
+          const s = statuses[i];
+          return s.state === 'file' && resolvePage(row) ? [s.fileIndex] : [];
+        }),
+      ));
+      const refByFile = new Map<number, string>();
+      if (neededFiles.length > 0) {
+        const purpose = csvData.some((row) => needsApproval(resolvePage(row))) ? 'draft' : 'direct';
+        const refs = await uploadMediaFiles(
+          neededFiles.map((i) => mediaFiles[i]), purpose,
+          (done, total) => setUploadProgress(`Uploading media ${done}/${total}…`),
+        );
+        neededFiles.forEach((fileIndex, k) => refByFile.set(fileIndex, refs[k]));
+      }
+      setUploadProgress(null);
+
+      const mediaFor = (index: number, row: CSVRow): { media_type: string | null; media_url: string | null } => {
+        const s = statuses[index];
+        if (s.state === 'file') return { media_type: s.kind, media_url: refByFile.get(s.fileIndex) || null };
+        if (s.state === 'url') return { media_type: s.kind, media_url: row.media_url.trim() };
+        return { media_type: null, media_url: null };
+      };
 
       let successCount = 0;
       let failedRows: string[] = [];
       const draftRows: DraftPayload[] = [];
 
-      for (const row of csvData) {
+      for (const [index, row] of Array.from(csvData.entries())) {
         const page = resolvePage(row);
 
         if (!page) {
           failedRows.push(`${row.location_number || row.location_name} (page not found)`);
           continue;
         }
+        const media = mediaFor(index, row);
 
         // Approval-workflow clients: queue as drafts for internal → client review
         if (needsApproval(page)) {
@@ -362,8 +443,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             post_content: row.post_content,
             link_url: row.link_url || null,
             scheduled_for: parseScheduledDate(row.scheduled_for),
-            media_type: row.media_type && row.media_type !== 'text' ? row.media_type : null,
-            media_url: row.media_url || null,
+            media_type: media.media_type,
+            media_url: media.media_url,
           });
           continue;
         }
@@ -373,11 +454,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           franchise_name: page.location_name,
           location_number: page.location_number || null,
           post_content: row.post_content,
-          link_url: (!row.media_type || row.media_type === 'text') ? (row.link_url || null) : null,
+          link_url: media.media_type ? null : (row.link_url || null),
           scheduled_for: parseScheduledDate(row.scheduled_for),
           publish_now: false,
-          media_type: row.media_type && row.media_type !== 'text' ? row.media_type : null,
-          media_url: row.media_url || null,
+          media_type: media.media_type,
+          media_url: media.media_url,
           // Placeholder values
           city: page.city || null,
           base_url: page.base_url || null,
@@ -393,7 +474,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         if (response.ok) {
           successCount++;
         } else {
-          failedRows.push(`${row.location_name} (API error)`);
+          const data = await response.json().catch(() => ({}));
+          failedRows.push(`${row.location_name || row.location_number} (${data.error || 'API error'})`);
         }
       }
 
@@ -412,48 +494,22 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
       if (successCount > 0 || draftsOk) {
         setSuccess([successCount > 0 ? `Successfully created ${successCount} post(s)!` : '', draftSummary].filter(Boolean).join(' '));
-        setCsvData([]);
-        if (fileInputRef.current) {
-          fileInputRef.current.value = '';
-        }
+        clearBulk();
         onPostCreated(draftsOk && successCount === 0 ? 'approvals' : 'scheduled');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
+      setUploadProgress(null);
       setSubmitting(false);
     }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setCsvError(null);
-    setCsvData([]);
-
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.name.endsWith('.csv')) {
-      setCsvError('Please upload a CSV file');
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const text = event.target?.result as string;
-        const rows = parseCSV(text);
-
-        if (rows.length === 0) {
-          setCsvError('CSV file is empty or has no valid data rows');
-          return;
-        }
-
-        setCsvData(rows);
-      } catch (err) {
-        setCsvError(err instanceof Error ? err.message : 'Failed to parse CSV');
-      }
-    };
-    reader.readAsText(file);
+    const files = Array.from(e.target.files || []);
+    // reset so picking the same file again still fires onChange
+    e.target.value = '';
+    handleBulkFiles(files);
   };
 
   const parseCSV = (text: string): CSVRow[] => {
@@ -563,6 +619,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         link_url: row.link_url || '',
         scheduled_for: row.scheduled_for || '',
         media_type: row.media_type || '',
+        media_file: row.media_file || '',
         media_url: row.media_url || '',
       });
     }
@@ -595,7 +652,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const downloadTemplate = () => {
     // 'notes' is for people reading the file; the importer ignores columns it doesn't know.
-    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for', 'media_type', 'media_url', 'notes'];
+    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
     // One franchise example (matched on location_number) and non-franchise examples (blank
     // location_number, matched on the exact page name). Dates are 95+ days out so a test upload
     // can be reviewed and deleted long before it's due.
@@ -606,19 +663,17 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       const h = d.getHours();
       return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()} ${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
     };
-    // Labeled TEST media served by this app (public/template-media), so previews and n8n can fetch real files
-    const media = (file: string) => `${window.location.origin}/template-media/${file}`;
     // Example pages are deliberately fake: uploading the template unchanged reports "page not found"
     // for every row and never creates posts on a real client page. Replace with real pages.
     const EXAMPLE_NOTE = 'EXAMPLE ROW: replace the page with a real one from the Pages tab (or delete this row).';
     const exampleRows = [
-      ['0001', 'Example Franchise Location A', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '{{BASEURL}}', daysOut(95, 9), '', '',
+      ['0001', 'Example Franchise Location A', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '{{BASEURL}}', daysOut(95, 9), '', '', '',
         `FRANCHISE LOCATION, text + link: location_number is matched first (name is a fallback). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. ${EXAMPLE_NOTE}`],
-      ['0002', 'Example Franchise Location B', 'Photo post for {{CITY}}.', '', daysOut(95, 11), 'photo', media('test-photo.jpg'),
-        `FRANCHISE LOCATION, photo: media_type=photo and media_url = a public .jpg/.png (link_url is ignored for photos). ${EXAMPLE_NOTE}`],
-      ['0003', 'Example Franchise Location C', 'Video post for {{CITY}}.', '', daysOut(96, 9), 'video', media('test-video.mp4'),
-        `FRANCHISE LOCATION, video: media_type=video and media_url = a public .mp4. ${EXAMPLE_NOTE}`],
-      ['', 'Example Brand Page', 'Text-only post for a non-franchise page.', '', daysOut(96, 11), '', '',
+      ['0002', 'Example Franchise Location B', 'Photo post for {{CITY}}.', '', daysOut(95, 11), 'photo', 'example-photo.jpg', '',
+        `FRANCHISE LOCATION, photo: media_file = the name of an image you upload together with this CSV (JPG/PNG/GIF/WEBP, max 10 MB). Several rows can use the same file. media_type can be left blank (detected from the file). link_url is ignored for photos. ${EXAMPLE_NOTE}`],
+      ['0003', 'Example Franchise Location C', 'Video post for {{CITY}}.', '', daysOut(96, 9), 'video', 'example-video.mp4', '',
+        `FRANCHISE LOCATION, video: media_file = the name of a video you upload with this CSV (MP4/MOV, max 100 MB). Instead of a file you can put a public https link in media_url and leave media_file blank. ${EXAMPLE_NOTE}`],
+      ['', 'Example Brand Page', 'Text-only post for a non-franchise page.', '', daysOut(96, 11), '', '', '',
         `NON-FRANCHISE PAGE (e.g. IANA): leave location_number blank and put the page name exactly as on the Pages tab. Text only = leave link_url/media blank. Skip {{CITY}}/{{PHONE}}/{{BASEURL}} unless set for the page. ${EXAMPLE_NOTE}`],
     ];
 
@@ -903,7 +958,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                           <input
                             ref={mediaFileInputRef}
                             type="file"
-                            accept={mediaType === 'photo' ? 'image/*' : 'video/*'}
+                            accept={mediaType === 'photo' ? 'image/jpeg,image/png,image/gif,image/webp' : 'video/mp4,video/quicktime,.mov'}
                             onChange={handleMediaFileSelect}
                             className="hidden"
                             id="media-upload"
@@ -921,7 +976,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                               <span className="text-blue-600 font-medium">Click to upload</span> or drag and drop
                             </p>
                             <p className="text-xs text-gray-500 mt-1">
-                              {mediaType === 'photo' ? 'JPG, PNG, GIF, WEBP up to 10MB' : 'MP4, MOV, AVI, WMV up to 100MB'}
+                              {mediaType === 'photo' ? 'JPG, PNG, GIF, WEBP up to 10MB' : 'MP4, MOV up to 100MB'}
                             </p>
                           </label>
                         </div>
@@ -936,12 +991,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                                 className="w-24 h-24 object-cover rounded-lg"
                               />
                             )}
-                            {mediaType === 'video' && (
-                              <div className="w-24 h-24 bg-gray-100 rounded-lg flex items-center justify-center">
-                                <svg className="w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                </svg>
-                              </div>
+                            {previewUrl && mediaType === 'video' && (
+                              <video src={previewUrl} muted preload="metadata" className="w-24 h-24 object-cover rounded-lg bg-black" />
                             )}
                             {/* File info */}
                             <div className="flex-1 min-w-0">
@@ -1026,7 +1077,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                           content={replacePlaceholders(postContent, vals)}
                           linkUrl={mediaType === 'text' ? replacePlaceholders(linkUrl, vals) || null : null}
                           mediaType={mediaType !== 'text' ? mediaType : null}
-                          mediaUrl={mediaType === 'text' ? null : (mediaInputMode === 'url' ? mediaUrl : (uploadedUrl || previewUrl))}
+                          mediaUrl={mediaType === 'text' ? null : (mediaInputMode === 'url' ? mediaUrl : previewUrl)}
                           scheduledFor={!publishNow && scheduledFor ? new Date(scheduledFor).toISOString() : null}
                         />
                       );
@@ -1166,7 +1217,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               {/* File Upload */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Upload CSV File
+                  Upload CSV + Media Files
                 </label>
                 <div
                   onDragOver={handleDragOver}
@@ -1181,7 +1232,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".csv"
+                    accept={`.csv,text/csv,${ACCEPT_MEDIA},.jpg,.jpeg,.png,.gif,.webp,.mp4,.mov`}
+                    multiple
                     onChange={handleFileUpload}
                     className="hidden"
                     id="csv-upload"
@@ -1192,18 +1244,50 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     </svg>
                     <p className="text-sm text-gray-600">
                       {isDraggingCSV ? (
-                        <span className="text-blue-600 font-medium">Drop your CSV file here</span>
+                        <span className="text-blue-600 font-medium">Drop your CSV and media files here</span>
                       ) : (
                         <>
                           <span className="text-blue-600 font-medium">Click to upload</span> or drag and drop
                         </>
                       )}
                     </p>
-                    <p className="text-xs text-gray-500 mt-1">CSV files only</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Select the CSV and all its images/videos together (or add files in several drops). {MEDIA_HELP}
+                    </p>
                   </label>
                 </div>
                 {csvError && (
                   <p className="mt-2 text-sm text-red-600">{csvError}</p>
+                )}
+                {bulkNotice && (
+                  <p className="mt-2 text-sm text-amber-700">{bulkNotice}</p>
+                )}
+                {(csvData.length > 0 || mediaFiles.length > 0) && (
+                  <div className="mt-2 flex items-center justify-between text-sm text-gray-600">
+                    <span>
+                      {csvData.length > 0 ? `${csvData.length} row(s) from CSV` : 'No CSV yet'} · {mediaFiles.length} media file(s)
+                    </span>
+                    <button type="button" onClick={clearBulk} className="text-gray-500 hover:text-gray-700 underline" disabled={submitting}>
+                      Clear all
+                    </button>
+                  </div>
+                )}
+                {mediaMapping.unreferenced.length > 0 && (
+                  <div className="mt-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm text-amber-900">
+                    <p className="font-medium">
+                      {mediaMapping.unreferenced.length} file(s) not used by any row{csvData.length > 0 ? ' (check the media_file column)' : ''}:
+                    </p>
+                    <ul className="mt-1 flex flex-wrap gap-2">
+                      {mediaMapping.unreferenced.map((i) => (
+                        <li key={`${mediaFiles[i].name}-${i}`} className="inline-flex items-center gap-1 bg-white border border-amber-200 rounded px-2 py-0.5">
+                          {mediaFiles[i].name}
+                          <button type="button" onClick={() => removeMediaFile(i)} className="text-amber-700 hover:text-amber-900" aria-label={`Remove ${mediaFiles[i].name}`}>
+                            ×
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
               </div>
 
@@ -1232,17 +1316,21 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                       {csvData.map((row, index) => {
                         const pg = resolvePage(row);
                         const vals = pg ? { city: pg.city, franchise_name: pg.location_name, location_number: pg.location_number, base_url: pg.base_url, phone: pg.phone } : {};
-                        const isMedia = row.media_type && row.media_type !== 'text';
+                        const ms = mediaMapping.rows[index];
+                        const kind = ms && (ms.state === 'file' || ms.state === 'url') ? ms.kind : null;
+                        // Real local file (object URL) when mapped; the CSV media_url otherwise
+                        const previewMedia = ms?.state === 'file' ? mediaObjectUrls[ms.fileIndex] || null : ms?.state === 'url' ? row.media_url.trim() : null;
                         return (
                           <div key={index}>
                             {!pg && <p className="text-xs text-red-600 mb-1">Row {index + 2}: page not found</p>}
+                            {ms?.state === 'error' && <p className="text-xs text-red-600 mb-1">Row {index + 2}: {ms.message}</p>}
                             <FacebookPostPreview
                               pageName={pg?.location_name || row.location_name || row.location_number}
                               facebookPageId={pg?.facebook_page_id}
                               content={replacePlaceholders(row.post_content, vals)}
-                              linkUrl={!isMedia ? replacePlaceholders(row.link_url, vals) || null : null}
-                              mediaType={isMedia ? row.media_type : null}
-                              mediaUrl={isMedia ? row.media_url : null}
+                              linkUrl={!kind ? replacePlaceholders(row.link_url, vals) || null : null}
+                              mediaType={kind}
+                              mediaUrl={previewMedia}
                               scheduledFor={parseScheduledDate(row.scheduled_for)}
                             />
                           </div>
@@ -1260,12 +1348,17 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location Name</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Content</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Media</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Scheduled</th>
                           </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                          {csvData.map((row, index) => (
-                            <tr key={index}>
+                          {csvData.map((row, index) => {
+                            const ms = mediaMapping.rows[index];
+                            const file = ms && (ms.state === 'file' || ms.state === 'error') && ms.fileIndex !== undefined ? mediaFiles[ms.fileIndex] : undefined;
+                            const thumb = ms && ms.state === 'file' ? mediaObjectUrls[ms.fileIndex] : undefined;
+                            return (
+                            <tr key={index} className={ms?.state === 'error' ? 'bg-red-50' : undefined}>
                               <td className="px-4 py-2 text-sm text-gray-900 whitespace-nowrap">
                                 {row.location_number || '-'}
                               </td>
@@ -1276,13 +1369,26 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                                 {row.post_content}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-500 whitespace-nowrap">
-                                {row.media_type || 'text'}
+                                {ms && ms.state !== 'error' ? mediaStatusLabel(ms) : (row.media_type || 'text')}
+                              </td>
+                              <td className="px-4 py-2 text-sm whitespace-nowrap">
+                                {ms?.state === 'file' && file && (
+                                  <span className="inline-flex items-center gap-2 text-gray-700">
+                                    {thumb && ms.kind === 'photo' && <img src={thumb} alt="" className="w-10 h-10 object-cover rounded" />}
+                                    {thumb && ms.kind === 'video' && <video src={thumb} muted preload="metadata" className="w-10 h-10 object-cover rounded bg-black" />}
+                                    <span className="max-w-[12rem] truncate">{file.name}</span>
+                                  </span>
+                                )}
+                                {ms?.state === 'url' && <span className="text-gray-500 max-w-[12rem] truncate inline-block align-middle">{row.media_url}</span>}
+                                {ms?.state === 'none' && <span className="text-gray-400">-</span>}
+                                {ms?.state === 'error' && <span className="text-red-700 font-medium">{mediaStatusLabel(ms)}</span>}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-500 whitespace-nowrap">
                                 {formatDateForDisplay(row.scheduled_for)}
                               </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -1303,13 +1409,26 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 </div>
               )}
 
+              {mediaErrorRows.length > 0 && (
+                <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg text-sm flex items-center justify-between gap-4">
+                  <span>
+                    {mediaErrorRows.length} row(s) have media problems (rows {mediaErrorRows.slice(0, 8).map((i) => i + 2).join(', ')}{mediaErrorRows.length > 8 ? '…' : ''}).
+                    Add the missing files or fix the CSV, or leave those rows out.
+                  </span>
+                  <button type="button" onClick={removeErroredRows} disabled={submitting}
+                    className="shrink-0 px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-100">
+                    Leave out {mediaErrorRows.length} row(s)
+                  </button>
+                </div>
+              )}
+
               {/* Submit Button */}
               <div className="flex justify-end">
                 <button
                   onClick={handleBulkSubmit}
-                  disabled={submitting || csvData.length === 0}
+                  disabled={submitting || csvData.length === 0 || mediaErrorRows.length > 0}
                   className={`px-6 py-2 rounded-lg font-medium text-white ${
-                    submitting || csvData.length === 0
+                    submitting || csvData.length === 0 || mediaErrorRows.length > 0
                       ? 'bg-gray-400 cursor-not-allowed'
                       : 'bg-blue-600 hover:bg-blue-700'
                   }`}
@@ -1320,7 +1439,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                       </svg>
-                      Uploading...
+                      {uploadProgress || 'Uploading...'}
                     </span>
                   ) : (
                     `Upload ${csvData.length} Post${csvData.length !== 1 ? 's' : ''}`
@@ -1337,11 +1456,17 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <li>• <strong>post_content</strong> (required): The text content of your post</li>
                   <li>• <strong>link_url</strong> (optional): URL to include with text posts (ignored for photo/video)</li>
                   <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
-                  <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;</li>
-                  <li>• <strong>media_url</strong> (optional): Publicly accessible URL to photo or video file</li>
+                  <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;. With media_file it can be left blank (detected from the file)</li>
+                  <li>• <strong>media_file</strong> (optional): File name of an image/video you upload together with the CSV (e.g. example-photo.jpg). Matching ignores upper/lower case and folders; without an extension it matches the file name before the dot. Several rows can share one file</li>
+                  <li>• <strong>media_url</strong> (optional): Publicly accessible URL to a photo or video, used only when media_file is blank</li>
                   <li>• <strong>notes</strong> (optional): Your own notes; ignored on upload</li>
                 </ul>
                 <p className="text-sm text-gray-500 mt-2">Note: Either location_number or location_name is required for each row.</p>
+                <p className="text-sm text-gray-500 mt-1">
+                  Media: {MEDIA_HELP} Files are checked against the CSV before anything is created; rows with a missing file,
+                  a type mismatch or an oversized file block the upload until fixed or left out. Uploaded media stays private
+                  until the post is scheduled.
+                </p>
                 <p className="text-sm text-gray-500 mt-1">
                   Non-franchise pages (e.g. IANA): leave location_number blank and enter the page name exactly as it appears on the Pages tab.
                   Avoid {'{{CITY}}'}/{'{{BASEURL}}'}/{'{{PHONE}}'} unless those fields are filled in for the page.
