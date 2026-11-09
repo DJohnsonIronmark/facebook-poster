@@ -19,6 +19,8 @@ export interface FacebookPage {
   base_url: string | null;
   phone: string | null;
   client_id?: string | null;
+  ig_user_id?: string | null;   // linked Instagram business account (required for Instagram posts)
+  ig_username?: string | null;
 }
 
 export interface ScheduledPost {
@@ -33,6 +35,8 @@ export interface ScheduledPost {
   created_at: string;
   published_at: string | null;
   facebook_post_id: string | null;
+  platform?: 'facebook' | 'instagram' | null;
+  post_group_id?: string | null;
 }
 
 export default function Home() {

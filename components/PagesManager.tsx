@@ -11,6 +11,8 @@ interface PageRow {
   base_url: string | null;
   phone: string | null;
   client_id: string | null;
+  ig_user_id?: string | null;
+  ig_username?: string | null;
 }
 interface ClientOpt { id: string; name: string }
 interface FbPage { id: string; name: string; picture: string | null; location: string | null; already_added: boolean }
@@ -24,7 +26,9 @@ const FB_FLAG_MESSAGES: Record<string, { kind: 'ok' | 'error'; text: string }> =
   error: { kind: 'error', text: 'Facebook sign-in failed. Please try again.' },
 };
 
-const EMPTY = { location_name: '', facebook_page_id: '', location_number: '', city: '', base_url: '', phone: '' };
+const EMPTY = { location_name: '', facebook_page_id: '', location_number: '', city: '', base_url: '', phone: '', ig_user_id: '', ig_username: '' };
+
+const IG_ID_HINT = 'Optional, needed for Instagram posts: the numeric Instagram business account ID linked to this page (Meta Business Suite → Settings → Instagram accounts, or Graph API {page-id}?fields=instagram_business_account).';
 
 export default function PagesManager({ onPagesChanged }: { onPagesChanged: () => void }) {
   const [pages, setPages] = useState<PageRow[]>([]);
@@ -166,6 +170,10 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
             <Field label="City ({{CITY}})" value={form.city} onChange={(v) => setForm({ ...form, city: v })} placeholder="Augusta" />
             <Field label="Website ({{BASEURL}})" value={form.base_url} onChange={(v) => setForm({ ...form, base_url: v })} placeholder="https://www.homeinstead.com/location/788" />
             <Field label="Phone ({{PHONE}})" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} placeholder="(706) 555-0100" />
+            <Field label="Instagram account ID" value={form.ig_user_id} onChange={(v) => setForm({ ...form, ig_user_id: v.replace(/\D/g, '') })}
+              placeholder="17841400000000000" hint={IG_ID_HINT} inputMode="numeric" />
+            <Field label="Instagram username" value={form.ig_username} onChange={(v) => setForm({ ...form, ig_username: v.replace(/^@+/, '') })}
+              placeholder="homeinsteadaugusta" hint="Without the @. Shown in Instagram previews." />
             <div className="sm:col-span-2 flex justify-end">
               <button type="submit" disabled={saving || !form.location_name.trim() || !form.facebook_page_id}
                 className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium disabled:opacity-50">
@@ -228,7 +236,15 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
           ) : (
             <li key={p.id} className="flex flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
               <div className="flex-1 min-w-[220px]">
-                <div className="font-medium text-gray-900">{p.location_number ? `${p.location_number} · ` : ''}{p.location_name}</div>
+                <div className="font-medium text-gray-900 flex items-center gap-2">
+                  <span>{p.location_number ? `${p.location_number} · ` : ''}{p.location_name}</span>
+                  {p.ig_user_id && (
+                    <span className="text-xs font-semibold bg-pink-100 text-pink-800 px-1.5 py-0.5 rounded"
+                      title={`Instagram ${p.ig_username ? `@${p.ig_username}` : ''} (ID ${p.ig_user_id})`}>
+                      IG<span className="sr-only"> account linked{p.ig_username ? `: @${p.ig_username}` : ''}</span>
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs text-gray-500">
                   Page ID {p.facebook_page_id}{p.city ? ` · ${p.city}` : ''}{p.client_id ? ` · ${clientName.get(p.client_id) || 'client'}` : ''}
                 </div>
@@ -243,13 +259,14 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   );
 }
 
-function Field({ label, value, onChange, placeholder, required, hint }: {
+function Field({ label, value, onChange, placeholder, required, hint, inputMode }: {
   label: string; value: string; onChange: (v: string) => void; placeholder?: string; required?: boolean; hint?: string;
+  inputMode?: 'numeric' | 'text';
 }) {
   return (
     <label className="block text-sm">
       <span className="text-gray-700">{label}</span>
-      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} required={required}
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} required={required} inputMode={inputMode}
         className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-1.5" />
       {hint && <span className="block mt-1 text-xs text-gray-500">{hint}</span>}
     </label>
@@ -260,6 +277,7 @@ function EditRow({ page, onDone }: { page: PageRow; onDone: (saved: boolean) => 
   const [f, setF] = useState({
     location_name: page.location_name, location_number: page.location_number || '', city: page.city || '',
     base_url: page.base_url || '', phone: page.phone || '',
+    ig_user_id: page.ig_user_id || '', ig_username: page.ig_username || '',
   });
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -283,6 +301,10 @@ function EditRow({ page, onDone }: { page: PageRow; onDone: (saved: boolean) => 
         <Field label="City" value={f.city} onChange={(v) => setF({ ...f, city: v })} />
         <Field label="Website" value={f.base_url} onChange={(v) => setF({ ...f, base_url: v })} />
         <Field label="Phone" value={f.phone} onChange={(v) => setF({ ...f, phone: v })} />
+        <Field label="Instagram account ID" value={f.ig_user_id} onChange={(v) => setF({ ...f, ig_user_id: v.replace(/\D/g, '') })}
+          placeholder="17841400000000000" inputMode="numeric" hint="Numeric ID; blank = no Instagram posts for this page." />
+        <Field label="Instagram username" value={f.ig_username} onChange={(v) => setF({ ...f, ig_username: v.replace(/^@+/, '') })}
+          placeholder="without @" />
       </div>
       {error && <p className="text-sm text-red-600 mt-2">{error}</p>}
       <div className="flex justify-end gap-2 mt-2">

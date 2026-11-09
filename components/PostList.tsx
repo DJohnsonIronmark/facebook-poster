@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { ScheduledPost } from '@/app/page';
+import PlatformBadge from './PlatformBadge';
 
 interface PostListProps {
   posts: ScheduledPost[];
@@ -134,6 +135,7 @@ export default function PostList({
                 <p className="text-sm text-gray-500">Page ID: {post.facebook_page_id}</p>
               </div>
               <div className="flex items-center gap-2">
+                <PlatformBadge platform={post.platform} />
                 {post.status === 'published' ? (
                   <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                     Published
@@ -184,7 +186,7 @@ export default function PostList({
 
               <div className="flex items-center gap-2">
                 {/* Preview Link - only for published posts with facebook_post_id */}
-                {post.status === 'published' && post.facebook_post_id && (
+                {post.status === 'published' && post.facebook_post_id && post.platform !== 'instagram' && (
                   <a
                     href={`https://www.facebook.com/${post.facebook_post_id}`}
                     target="_blank"
@@ -197,7 +199,8 @@ export default function PostList({
                     View on Facebook
                   </a>
                 )}
-                {showPublishButton && (
+                {/* "Publish now" goes through the Facebook webhook; Instagram posts publish on schedule only */}
+                {showPublishButton && post.platform !== 'instagram' && (
                   <button
                     onClick={() => handlePublish(post)}
                     disabled={publishingId === post.id}
