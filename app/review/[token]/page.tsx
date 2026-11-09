@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import FacebookPostPreview, { type PreviewLinkCard } from '@/components/FacebookPostPreview';
 import DeviceToggle from '@/components/DeviceToggle';
+import InstagramPostPreview from '@/components/InstagramPostPreview';
+import PlatformBadge from '@/components/PlatformBadge';
+import IgCaptionMeter from '@/components/IgCaptionMeter';
+import { groupPosts } from '@/lib/review/grouping';
+import { validateIgCaption } from '@/lib/instagram/rules';
 
 interface ClientPost {
   id: string;
@@ -16,6 +21,9 @@ interface ClientPost {
   scheduled_for: string | null;
   client_comment: string | null;
   link_preview: PreviewLinkCard | null;
+  platform?: 'facebook' | 'instagram' | null;
+  post_group_id?: string | null;
+  ig_username?: string | null;
 }
 
 interface BatchInfo {
@@ -64,6 +72,9 @@ export default function ClientReviewPage({ params }: { params: { token: string }
     () => posts.filter((p) => drafts[p.id] && (drafts[p.id].post_content !== p.post_content || drafts[p.id].client_comment !== (p.client_comment || ''))),
     [posts, drafts],
   );
+  const groups = useMemo(() => groupPosts(posts), [posts]);
+  // Instagram captions over Instagram's limits can't be saved or approved (the server rejects them too)
+  const igInvalid = posts.some((p) => p.platform === 'instagram' && drafts[p.id] && validateIgCaption(drafts[p.id].post_content).errors.length > 0);
 
   const submit = async (action: 'save' | 'approve') => {
     setBusy(action);
@@ -126,7 +137,7 @@ export default function ClientReviewPage({ params }: { params: { token: string }
               {posts.length} post{posts.length === 1 ? '' : 's'} ready for your review
             </p>
             <p className="text-sm">
-              Each preview shows the post exactly as it will look on Facebook. Edit the text on the right and the preview updates as you type.
+              Each preview shows the post exactly as it will look on Facebook or Instagram. Edit the text on the right and the preview updates as you type.
               Leave a note if you need something else changed (an image, a link or a date). When everything looks right, approve at the bottom.
             </p>
           </div>
@@ -139,29 +150,52 @@ export default function ClientReviewPage({ params }: { params: { token: string }
         )}
 
         <div className="space-y-6">
-          {posts.map((post, i) => {
+          {groups.map((group, i) => (
+            <section key={group[0].post_group_id || group[0].id} aria-label={`Post ${i + 1}: ${group[0].franchise_name}`}
+              className="bg-white/60 rounded-xl p-4 space-y-6">
+              {group.length > 1 && (
+                <h2 className="font-semibold text-gray-900">
+                  Post {i + 1} · {group[0].franchise_name}{' '}
+                  <span className="font-normal text-sm text-gray-600">Facebook and Instagram versions. Edit each one separately.</span>
+                </h2>
+              )}
+              {group.map((post) => {
             const d = drafts[post.id] || { post_content: post.post_content, client_comment: '' };
             const isChanged = d.post_content !== post.post_content;
+            const isIg = post.platform === 'instagram';
+            const Heading = group.length > 1 ? 'h3' : 'h2';
             return (
-              <section key={post.id} className="bg-white/60 rounded-xl p-4 grid gap-5 lg:grid-cols-[minmax(0,520px)_1fr]">
+              <div key={post.id} className="grid gap-5 lg:grid-cols-[minmax(0,520px)_1fr]">
                 <div>
-                  <FacebookPostPreview
-                    pageName={post.franchise_name}
-                    facebookPageId={post.facebook_page_id}
-                    content={d.post_content}
-                    linkUrl={post.link_url}
-                    linkPreview={post.link_preview}
-                    mediaType={post.media_type}
-                    mediaUrl={post.media_url}
-                    scheduledFor={post.scheduled_for}
-                    device={device}
-                  />
+                  {isIg ? (
+                    <InstagramPostPreview
+                      username={post.ig_username || post.franchise_name}
+                      facebookPageId={post.facebook_page_id}
+                      caption={d.post_content}
+                      mediaType={post.media_type}
+                      mediaUrl={post.media_url}
+                      device={device}
+                    />
+                  ) : (
+                    <FacebookPostPreview
+                      pageName={post.franchise_name}
+                      facebookPageId={post.facebook_page_id}
+                      content={d.post_content}
+                      linkUrl={post.link_url}
+                      linkPreview={post.link_preview}
+                      mediaType={post.media_type}
+                      mediaUrl={post.media_url}
+                      scheduledFor={post.scheduled_for}
+                      device={device}
+                    />
+                  )}
                 </div>
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h2 className="font-semibold text-gray-900">
-                      Post {i + 1} · {post.franchise_name}
-                    </h2>
+                  <div className="flex items-center justify-between gap-2">
+                    <Heading className="font-semibold text-gray-900 flex items-center gap-2">
+                      <PlatformBadge platform={post.platform} />
+                      {group.length > 1 ? `${isIg ? 'Instagram' : 'Facebook'} version` : `Post ${i + 1} · ${post.franchise_name}`}
+                    </Heading>
                     {isChanged && <span className="text-xs font-medium bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">Edited</span>}
                   </div>
                   {post.scheduled_for && (
@@ -170,15 +204,17 @@ export default function ClientReviewPage({ params }: { params: { token: string }
                     </p>
                   )}
                   <label className="block">
-                    <span className="text-sm font-medium text-gray-700">Post text</span>
+                    <span className="text-sm font-medium text-gray-700">{isIg ? 'Instagram caption' : 'Post text'}</span>
                     <textarea
                       value={d.post_content}
                       readOnly={readOnly}
                       onChange={(e) => setDrafts({ ...drafts, [post.id]: { ...d, post_content: e.target.value } })}
                       rows={8}
+                      aria-describedby={isIg ? `igmeter-${post.id}` : undefined}
                       className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-[15px] focus:ring-2 focus:ring-blue-500 focus:border-blue-500 read-only:bg-gray-50"
                     />
                   </label>
+                  {isIg && !readOnly && <IgCaptionMeter caption={d.post_content} id={`igmeter-${post.id}`} />}
                   {isChanged && !readOnly && (
                     <button type="button" className="text-sm text-blue-600 hover:underline"
                       onClick={() => setDrafts({ ...drafts, [post.id]: { ...d, post_content: post.post_content } })}>
@@ -198,9 +234,11 @@ export default function ClientReviewPage({ params }: { params: { token: string }
                     />
                   </label>
                 </div>
-              </section>
+              </div>
             );
-          })}
+              })}
+            </section>
+          ))}
         </div>
       </main>
 
@@ -212,11 +250,11 @@ export default function ClientReviewPage({ params }: { params: { token: string }
                 <span className="text-sm text-gray-600 mr-auto">
                   {changed.length > 0 ? `${changed.length} unsaved change${changed.length === 1 ? '' : 's'}` : 'No unsaved changes'}
                 </span>
-                <button type="button" onClick={() => submit('save')} disabled={busy !== null || changed.length === 0}
+                <button type="button" onClick={() => submit('save')} disabled={busy !== null || changed.length === 0 || igInvalid}
                   className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 disabled:opacity-50">
                   {busy === 'save' ? 'Saving…' : 'Save without approving'}
                 </button>
-                <button type="button" onClick={() => setConfirming(true)} disabled={busy !== null}
+                <button type="button" onClick={() => setConfirming(true)} disabled={busy !== null || igInvalid}
                   className="px-5 py-2 rounded-lg bg-[#1877f2] text-white font-semibold hover:bg-[#166fe5] disabled:opacity-50">
                   Approve {posts.length} post{posts.length === 1 ? '' : 's'}
                 </button>

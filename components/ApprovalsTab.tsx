@@ -2,9 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import FacebookPostPreview from './FacebookPostPreview';
+import InstagramPostPreview from './InstagramPostPreview';
+import PlatformBadge from './PlatformBadge';
+import IgCaptionMeter from './IgCaptionMeter';
 import DeviceToggle from './DeviceToggle';
 import ClientSettings from './ClientSettings';
 import type { ReviewBatch, ReviewPost } from '@/lib/review/types';
+import { groupPosts } from '@/lib/review/grouping';
+import { validateIgCaption } from '@/lib/instagram/rules';
 import { downloadCSV, formatScheduledDate, parseCSVObjects, parseScheduledDate, toCSV } from '@/lib/csv';
 import {
   type ComposeEmail, clientReviewEmail, draftsReadyEmail, mailtoUrl, outlookComposeUrl, readyToPostEmail,
@@ -37,7 +42,8 @@ const STAGES: { key: Stage; label: string; hint: string }[] = [
   { key: 'client_approved', label: 'Ready to post', hint: 'Client approved: upload final posts and schedule' },
 ];
 
-const FINAL_HEADERS = ['post_id', 'client', 'location_number', 'location_name', 'post_content', 'link_url', 'media_url', 'scheduled_for', 'client_comment'];
+// 'platform' is informational (read-only): the import is keyed by post_id and ignores it
+const FINAL_HEADERS = ['post_id', 'platform', 'client', 'location_number', 'location_name', 'post_content', 'link_url', 'media_url', 'scheduled_for', 'client_comment'];
 
 interface Props {
   canEdit: boolean;   // admin/manager
@@ -54,6 +60,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [banner, setBanner] = useState<{ kind: 'ok' | 'error'; text: string; link?: string; compose?: ComposeEmail } | null>(null);
   const [showClients, setShowClients] = useState(false);
+  const [igEnabled, setIgEnabled] = useState(false);
   const finalInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -63,6 +70,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load approvals');
       setBatches(data.batches || []);
+      setIgEnabled(data.instagram_publishing_enabled === true);
     } catch (e) {
       setBanner({ kind: 'error', text: e instanceof Error ? e.message : 'Failed to load approvals' });
     } finally {
@@ -96,8 +104,12 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
 
   // ---------- final-form bulk export / upload across all client-approved batches ----------
   const exportFinal = () => {
+    // Only posts still waiting to be scheduled (a batch can hold Instagram posts after its Facebook posts went out)
     const rows = byStage.client_approved.flatMap((b) =>
-      (b.posts || []).map((p) => [p.id, b.client?.name || '', p.location_number, p.franchise_name, p.post_content, p.link_url, p.media_url, formatScheduledDate(p.scheduled_for), p.client_comment]),
+      (b.posts || []).filter((p) => p.status === 'client_approved').map((p) => [
+        p.id, p.platform || 'facebook', b.client?.name || '', p.location_number, p.franchise_name, p.post_content,
+        p.platform === 'instagram' ? '' : p.link_url, p.media_url, formatScheduledDate(p.scheduled_for), p.client_comment,
+      ]),
     );
     downloadCSV(`facebook_final_posts_${new Date().toISOString().slice(0, 10)}.csv`, toCSV(FINAL_HEADERS, rows));
   };
@@ -209,6 +221,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
             onToggle={() => setOpenId(openId === batch.id ? null : batch.id)}
             device={device}
             canEdit={canEdit}
+            igEnabled={igEnabled}
             isAccountManager={!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase()}
             canApproveForClient={isAdmin || (!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase())}
             onChanged={load}
@@ -237,11 +250,16 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
               } else if (action === 'schedule') {
                 setBanner({
                   kind: data.failures?.length ? 'error' : 'ok',
-                  text: `Scheduled ${data.scheduled} post(s) for ${batch.client?.name}.${data.failures?.length ? ` Failed: ${data.failures.join('; ')}` : ''}`,
+                  text: `Scheduled ${data.scheduled} post(s) for ${batch.client?.name}.`
+                    + `${data.instagram_message ? ` ${data.instagram_message}` : ''}`
+                    + `${data.failures?.length ? ` Failed: ${data.failures.join('; ')}` : ''}`,
                 });
                 onScheduled();
               } else if (action === 'cancel') {
-                setBanner({ kind: 'ok', text: `${batch.name} cancelled. Its posts will not publish.` });
+                setBanner({
+                  kind: 'ok',
+                  text: `${batch.name} cancelled. Its unscheduled posts will not publish.${data.already_scheduled ? ` ${data.already_scheduled} post(s) already scheduled earlier will still publish; delete them from the Scheduled tab if needed.` : ''}`,
+                });
               }
               await load();
             }}
@@ -255,18 +273,24 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
 // ---------------------------------------------------------------------------------------
 
 function BatchCard({
-  batch, open, onToggle, device, canEdit, canApproveForClient, isAccountManager, onChanged, onAction,
+  batch, open, onToggle, device, canEdit, igEnabled, canApproveForClient, isAccountManager, onChanged, onAction,
 }: {
-  batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean;
+  batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean; igEnabled: boolean;
   canApproveForClient: boolean; isAccountManager: boolean;
   onChanged: () => void; onAction: (action: string) => Promise<void>;
 }) {
   const [confirm, setConfirm] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
   const posts = batch.posts || [];
+  const groups = useMemo(() => groupPosts(posts), [posts]);
   const edited = posts.filter((p) => p.client_edited).length;
   const comments = posts.filter((p) => p.client_comment).length;
-  const unscheduled = posts.filter((p) => !p.scheduled_for).length;
+  // Scheduling releases only client_approved posts; Instagram ones wait while Instagram publishing is off
+  const approved = posts.filter((p) => p.status === 'client_approved');
+  const igWaiting = igEnabled ? [] : approved.filter((p) => p.platform === 'instagram');
+  const releasable = approved.filter((p) => igEnabled || p.platform !== 'instagram');
+  const alreadyScheduled = posts.filter((p) => p.status === 'pending').length;
+  const unscheduled = releasable.filter((p) => !p.scheduled_for).length;
   const fmt = (d?: string | null) => (d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '');
 
   const run = async (action: string) => {
@@ -279,8 +303,11 @@ function BatchCard({
   const confirmText: Record<string, string> = {
     approve_internal: `Email the review link (from the no-reply address, replies to ${batch.client?.account_manager_email || '(no account manager set)'}) to ${batch.client?.client_reviewer_emails?.join(', ') || '(no client emails configured)'}${batch.created_by_email && batch.created_by_email !== batch.client?.account_manager_email ? ` (cc ${batch.created_by_email})` : ''}?`,
     resend_link: 'Send a new link? The previous link will stop working.',
-    schedule: `Schedule ${posts.length} post(s) for ${batch.client?.name}? They will publish to Facebook at their scheduled times.`,
-    cancel: 'Cancel this batch? Its posts will never publish and the client link stops working.',
+    schedule: `Schedule ${releasable.length} post(s) for ${batch.client?.name}? They will publish at their scheduled times.`
+      + (igWaiting.length ? ` ${igWaiting.length} Instagram post(s) will wait here: Instagram publishing is not enabled yet.` : ''),
+    cancel: alreadyScheduled
+      ? `Cancel this batch? Its ${approved.length} unscheduled post(s) will never publish. ${alreadyScheduled} post(s) already scheduled will still publish (delete them from the Scheduled tab).`
+      : 'Cancel this batch? Its posts will never publish and the client link stops working.',
   };
 
   return (
@@ -298,6 +325,19 @@ function BatchCard({
             {edited > 0 && <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">{edited} edited by client</span>}
             {comments > 0 && <span className="text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full">{comments} client note{comments === 1 ? '' : 's'}</span>}
             {batch.status === 'client_approved' && unscheduled > 0 && <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full">{unscheduled} missing a schedule date</span>}
+            {posts.some((p) => p.platform === 'instagram') && (
+              <span className="text-xs bg-pink-100 text-pink-800 px-2 py-0.5 rounded-full">
+                {posts.filter((p) => p.platform === 'instagram').length} Instagram
+              </span>
+            )}
+            {batch.status === 'client_approved' && igWaiting.length > 0 && (
+              <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full" title="Set INSTAGRAM_PUBLISHING_ENABLED once the n8n Instagram publisher is live">
+                {igWaiting.length} Instagram waiting: publishing not enabled yet
+              </span>
+            )}
+            {batch.status === 'client_approved' && alreadyScheduled > 0 && (
+              <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full">{alreadyScheduled} already scheduled</span>
+            )}
           </div>
         </button>
 
@@ -347,10 +387,10 @@ function BatchCard({
                   </button>
                 )}
                 {batch.status === 'client_approved' && (
-                  <button onClick={() => setConfirm('schedule')} disabled={unscheduled > 0}
-                    title={unscheduled > 0 ? 'Every post needs a schedule date first' : undefined}
+                  <button onClick={() => setConfirm('schedule')} disabled={unscheduled > 0 || releasable.length === 0}
+                    title={releasable.length === 0 ? 'Nothing to schedule until Instagram publishing is enabled' : unscheduled > 0 ? 'Every post needs a schedule date first' : undefined}
                     className="px-3 py-1.5 text-sm rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-300">
-                    Schedule {posts.length} post{posts.length === 1 ? '' : 's'}
+                    Schedule {releasable.length} post{releasable.length === 1 ? '' : 's'}
                   </button>
                 )}
                 <button onClick={() => setConfirm('cancel')} className="px-3 py-1.5 text-sm rounded-lg bg-red-50 text-red-700 hover:bg-red-100">Cancel</button>
@@ -362,11 +402,20 @@ function BatchCard({
 
       {open && (
         <div className="border-t bg-[#f0f2f5] p-4 grid gap-5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${device === 'mobile' ? 340 : 440}px, 1fr))` }}>
-          {posts.map((p) => (
-            <PostReviewCard key={p.id} post={p} device={device}
-              editable={canEdit && (batch.status === 'internal_review' || batch.status === 'client_approved')}
-              onChanged={onChanged} />
-          ))}
+          {groups.map((group) => {
+            const cards = group.map((p) => (
+              <PostReviewCard key={p.id} post={p} device={device}
+                editable={canEdit && (batch.status === 'internal_review' || batch.status === 'client_approved') && p.status === batch.status}
+                onChanged={onChanged} />
+            ));
+            // Facebook + Instagram versions of one post: side by side, across the full row
+            return group.length > 1 ? (
+              <div key={group[0].post_group_id || group[0].id} role="group" aria-label={`${group[0].franchise_name}: Facebook and Instagram versions`}
+                className="grid gap-5 md:grid-cols-2 border border-dashed border-gray-300 rounded-xl p-3" style={{ gridColumn: '1 / -1' }}>
+                {cards}
+              </div>
+            ) : cards[0];
+          })}
         </div>
       )}
     </div>
@@ -398,11 +447,14 @@ function PostReviewCard({ post, device, editable, onChanged }: {
     setWhen(toLocalInput(post.scheduled_for));
   }, [post.post_content, post.link_url, post.scheduled_for]);
 
+  const isIg = post.platform === 'instagram';
+  const igBlocked = isIg && validateIgCaption(content).errors.length > 0;
+
   const save = async () => {
     setSaving(true);
     setError(null);
     const body: Record<string, unknown> = { post_content: content, scheduled_for: when ? new Date(when).toISOString() : null };
-    if (!post.media_type) body.link_url = link;
+    if (!post.media_type && !isIg) body.link_url = link;
     const res = await fetch(`/api/review/posts/${post.id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
@@ -421,21 +473,34 @@ function PostReviewCard({ post, device, editable, onChanged }: {
 
   return (
     <div className="space-y-2">
-      <FacebookPostPreview
-        pageName={post.franchise_name}
-        facebookPageId={post.facebook_page_id}
-        content={editing ? content : post.post_content}
-        linkUrl={editing && !post.media_type ? link : post.link_url}
-        linkPreview={editing && link !== (post.link_url || '') ? null : post.link_preview}
-        mediaType={post.media_type}
-        mediaUrl={post.media_url}
-        scheduledFor={editing ? (when ? new Date(when).toISOString() : null) : post.scheduled_for}
-        device={device}
-      />
+      {isIg ? (
+        <InstagramPostPreview
+          username={post.ig_username || post.franchise_name}
+          facebookPageId={post.facebook_page_id}
+          caption={editing ? content : post.post_content}
+          mediaType={post.media_type}
+          mediaUrl={post.media_url}
+          device={device}
+        />
+      ) : (
+        <FacebookPostPreview
+          pageName={post.franchise_name}
+          facebookPageId={post.facebook_page_id}
+          content={editing ? content : post.post_content}
+          linkUrl={editing && !post.media_type ? link : post.link_url}
+          linkPreview={editing && link !== (post.link_url || '') ? null : post.link_preview}
+          mediaType={post.media_type}
+          mediaUrl={post.media_url}
+          scheduledFor={editing ? (when ? new Date(when).toISOString() : null) : post.scheduled_for}
+          device={device}
+        />
+      )}
 
       <div className="bg-white rounded-lg p-3 text-sm space-y-2 max-w-[500px] mx-auto">
         <div className="flex flex-wrap items-center gap-2">
+          <PlatformBadge platform={post.platform} />
           <span className="font-medium text-gray-800">{post.location_number ? `${post.location_number} · ` : ''}{post.franchise_name}</span>
+          {post.status === 'pending' && <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full">Scheduled</span>}
           {post.client_edited && (
             <button onClick={() => setShowOriginal(!showOriginal)} className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full hover:bg-amber-200">
               Edited by client {showOriginal ? '▲' : '▼'}
@@ -459,8 +524,11 @@ function PostReviewCard({ post, device, editable, onChanged }: {
         {editing ? (
           <div className="space-y-2">
             <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={6}
+              aria-label={`${isIg ? 'Instagram caption' : 'Facebook post text'} for ${post.franchise_name}`}
+              aria-describedby={isIg ? `igmeter-${post.id}` : undefined}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500" />
-            {!post.media_type && (
+            {isIg && <IgCaptionMeter caption={content} id={`igmeter-${post.id}`} />}
+            {!post.media_type && !isIg && (
               <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="Link URL (optional)"
                 className="w-full border border-gray-300 rounded-lg px-3 py-1.5" />
             )}
@@ -472,7 +540,7 @@ function PostReviewCard({ post, device, editable, onChanged }: {
             <div className="flex gap-2 justify-end">
               <button onClick={() => { setEditing(false); setContent(post.post_content); setLink(post.link_url || ''); setWhen(toLocalInput(post.scheduled_for)); }}
                 className="px-3 py-1.5 rounded-lg border">Cancel</button>
-              <button onClick={save} disabled={saving || !content.trim()} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+              <button onClick={save} disabled={saving || !content.trim() || igBlocked} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
                 {saving ? 'Saving…' : 'Save'}
               </button>
             </div>
