@@ -4,9 +4,16 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import type { FacebookPage } from '@/app/page';
 import SearchableMultiSelect from './SearchableMultiSelect';
 import FacebookPostPreview from './FacebookPostPreview';
+import InstagramPostPreview from './InstagramPostPreview';
+import PlatformBadge from './PlatformBadge';
+import IgCaptionMeter from './IgCaptionMeter';
 import { replacePlaceholders } from '@/lib/placeholders';
 import { ACCEPT_MEDIA, MEDIA_HELP, baseName, fileExtension, mapRowsToFiles, validateMediaFile, type RowMediaStatus } from '@/lib/media/mapping';
 import { uploadMediaFiles } from '@/lib/media/upload';
+// MM/DD/YYYY [h:mm AM|PM] (local) or ISO → ISO; same rules the CSV importer always used
+import { parseScheduledDate } from '@/lib/csv';
+import { evaluateInstagramTarget, parsePlatformsCell, type IgTargetMedia, type Platform } from '@/lib/instagram/rules';
+import { analyzeInstagramMedia, releaseIgMedia, type IgMediaInfo } from '@/lib/instagram/browser';
 
 interface PostFormProps {
   pages: FacebookPage[];
@@ -20,7 +27,23 @@ interface DraftPayload {
   scheduled_for: string | null;
   media_type: string | null;
   media_url: string | null;
+  platform: Platform;
+  post_group_id: string | null;
 }
+
+/** Browser analysis of a media file for Instagram → the shape evaluateInstagramTarget expects */
+function preparedIssues(info: IgMediaInfo | null | undefined): { errors: string[]; warnings: string[] } | undefined {
+  if (!info || info.state === 'loading') return undefined;
+  if (info.state === 'error') return { errors: [info.message], warnings: [] };
+  if (info.state === 'photo') return { errors: [], warnings: info.plan.cropped ? [info.plan.note, ...info.warnings] : info.warnings };
+  return { errors: info.errors, warnings: info.warnings };
+}
+
+const pageValues = (pg: FacebookPage | null | undefined) =>
+  pg ? { city: pg.city, franchise_name: pg.location_name, location_number: pg.location_number, base_url: pg.base_url, phone: pg.phone } : {};
+
+/** One id per post whose Facebook and Instagram versions are linked (validated and re-issued server-side) */
+const newGroupId = (platforms: Platform[]) => (platforms.length > 1 ? crypto.randomUUID() : null);
 
 // Sends rows for approval-enabled clients into the review queue; returns a human summary
 async function submitDrafts(rows: DraftPayload[]): Promise<{ ok: boolean; summary: string }> {
@@ -47,6 +70,17 @@ interface CSVRow {
   media_type: string;
   media_file: string;
   media_url: string;
+  platforms: string;
+  ig_caption: string;
+}
+
+interface RowPlan {
+  page: FacebookPage | undefined;
+  platforms: Platform[];
+  errors: string[];
+  warnings: string[];
+  pending: boolean;
+  igCaption: string;
 }
 
 const MEDIA_FILE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov'];
@@ -90,14 +124,42 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const mediaFileInputRef = useRef<HTMLInputElement>(null);
   const [approvalClientIds, setApprovalClientIds] = useState<Set<string>>(new Set());
   const [showBulkPreviews, setShowBulkPreviews] = useState(false);
+  // Instagram
+  const [igEnabled, setIgEnabled] = useState(false);
+  const [wantFb, setWantFb] = useState(true);
+  const [wantIg, setWantIg] = useState(false);
+  const [igCaption, setIgCaption] = useState('');
+  const [singleIg, setSingleIg] = useState<IgMediaInfo | null>(null);
+  // Bulk: Instagram analysis per media file (JPEG derivative for photos, length/shape for videos)
+  const [igMedia, setIgMedia] = useState<Map<File, IgMediaInfo>>(new Map());
+  const igInFlight = useRef(new Set<File>());
+  const mediaFilesRef = useRef<File[]>([]);
+  mediaFilesRef.current = mediaFiles;
 
-  // Which clients have the approval workflow turned on
+  // Which clients have the approval workflow turned on; whether Instagram rows may be scheduled
   useEffect(() => {
     fetch('/api/clients')
       .then((r) => (r.ok ? r.json() : { clients: [] }))
       .then((d) => setApprovalClientIds(new Set((d.clients || []).filter((c: any) => c.approval_workflow_enabled).map((c: any) => c.id))))
       .catch(() => {});
+    fetch('/api/instagram/status')
+      .then((r) => (r.ok ? r.json() : { publishing_enabled: false }))
+      .then((d) => setIgEnabled(d.publishing_enabled === true))
+      .catch(() => {});
   }, []);
+
+  // Single post: prepare the Instagram version of the selected file
+  useEffect(() => {
+    if (!wantIg || !selectedFile || mediaType === 'text') { setSingleIg(null); return; }
+    let cancelled = false;
+    let made: IgMediaInfo | undefined;
+    setSingleIg({ state: 'loading' });
+    analyzeInstagramMedia(selectedFile, mediaType).then((info) => {
+      made = info;
+      if (cancelled) releaseIgMedia(info); else setSingleIg(info);
+    });
+    return () => { cancelled = true; releaseIgMedia(made); };
+  }, [wantIg, selectedFile, mediaType]);
 
   // Local object URLs so previews show the real files before anything is uploaded
   useEffect(() => {
@@ -118,6 +180,40 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const selectedPages = pages.filter(p => selectedPageIds.includes(p.id));
   const singleHasApprovalPages = selectedPages.some(p => p.client_id && approvalClientIds.has(p.client_id));
+
+  // Single post: Instagram checks per selected page (captions differ once placeholders are filled in).
+  // Messages that apply to several pages are shown once with the page names.
+  const singleIgMedia: IgTargetMedia = mediaType === 'text'
+    ? { source: 'none' }
+    : mediaInputMode === 'url'
+      ? { source: 'url', kind: mediaType, url: mediaUrl.trim() }
+      : selectedFile ? { source: 'file', kind: mediaType, prepared: preparedIssues(singleIg) } : { source: 'none' };
+  const singleIgCheck = (() => {
+    const errors = new Map<string, string[]>();
+    const warnings = new Map<string, string[]>();
+    let pending = false;
+    if (!wantIg) return { errors: [] as string[], warnings: [] as string[], pending };
+    for (const pg of selectedPages) {
+      const r = evaluateInstagramTarget({
+        caption: replacePlaceholders(igCaption.trim() || postContent, pageValues(pg)),
+        pageFound: true,
+        hasIgAccount: !!pg.ig_user_id,
+        media: singleIgMedia,
+        direct: !needsApproval(pg),
+        instagramEnabled: igEnabled,
+        hasSchedule: !!scheduledFor,
+        publishNow,
+      });
+      pending = pending || r.pending;
+      r.errors.forEach((e) => errors.set(e, [...(errors.get(e) || []), pg.location_name]));
+      r.warnings.forEach((w) => warnings.set(w, [...(warnings.get(w) || []), pg.location_name]));
+    }
+    const label = (m: Map<string, string[]>) => Array.from(m.entries()).map(([msg, names]) =>
+      selectedPages.length > 1 && names.length < selectedPages.length ? `${msg} (${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''})` : msg);
+    return { errors: label(errors), warnings: label(warnings), pending };
+  })();
+  const singleIgBlocked = wantIg && (singleIgCheck.pending || singleIgCheck.errors.length > 0);
+  const singlePlatforms: Platform[] = [...(wantFb ? ['facebook' as const] : []), ...(wantIg ? ['instagram' as const] : [])];
 
   // Handle CSV drag and drop
   const handleDragOver = (e: React.DragEvent) => {
@@ -242,20 +338,20 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         throw new Error('Please enter post content');
       }
 
-      // Determine the media URL to use
+      if (singlePlatforms.length === 0) throw new Error('Choose Facebook, Instagram or both');
+      if (wantIg && singleIgCheck.pending) throw new Error('Still preparing the Instagram version of your media…');
+      if (wantIg && singleIgCheck.errors.length > 0) throw new Error(`Instagram: ${singleIgCheck.errors[0]}`);
+      const purpose = selectedPages.some(needsApproval) ? 'draft' : 'direct';
+
+      // Media: Facebook keeps the original file; an Instagram photo uses its JPEG derivative
+      // (a separate upload); an Instagram video shares the original file.
       let finalMediaUrl: string | null = null;
       if (mediaType !== 'text') {
         if (mediaInputMode === 'file') {
-          if (selectedFile && !uploadedUrl) {
-            // Upload file first
-            finalMediaUrl = await uploadFile(selectedPages.some(needsApproval) ? 'draft' : 'direct');
-            if (!finalMediaUrl) {
-              throw new Error('Failed to upload media file');
-            }
-          } else if (uploadedUrl) {
-            finalMediaUrl = uploadedUrl;
-          } else {
-            throw new Error('Please select a media file');
+          if (!selectedFile) throw new Error('Please select a media file');
+          if (wantFb || mediaType === 'video') {
+            finalMediaUrl = uploadedUrl || await uploadFile(purpose);
+            if (!finalMediaUrl) throw new Error('Failed to upload media file');
           }
         } else {
           // URL mode
@@ -265,37 +361,52 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           finalMediaUrl = mediaUrl.trim();
         }
       }
+      let igMediaUrl: string | null = null;
+      if (wantIg && mediaType !== 'text') {
+        if (mediaInputMode === 'url' || mediaType === 'video') igMediaUrl = finalMediaUrl;
+        else if (singleIg?.state === 'photo') [igMediaUrl] = await uploadMediaFiles([singleIg.file], purpose);
+        else throw new Error('The Instagram version of the photo is not ready');
+      }
+
+      const groupByPage = new Map(selectedPages.map((p) => [p.id, newGroupId(singlePlatforms)]));
+      const contentFor = (platform: Platform) => (platform === 'instagram' ? igCaption.trim() || postContent.trim() : postContent.trim());
+      const linkFor = (platform: Platform) => (platform === 'facebook' && mediaType === 'text' ? (linkUrl.trim() || null) : null);
+      const mediaFor = (platform: Platform) => (platform === 'instagram' ? igMediaUrl : finalMediaUrl);
 
       // Pages whose client uses the approval workflow go to the review queue instead
       const approvalPages = selectedPages.filter(needsApproval);
       const directPages = selectedPages.filter(p => !needsApproval(p));
       let draftSummary = '';
       if (approvalPages.length > 0) {
-        const drafts = await submitDrafts(approvalPages.map(page => ({
+        const drafts = await submitDrafts(approvalPages.flatMap((page) => singlePlatforms.map((platform) => ({
           page_id: page.id,
-          post_content: postContent.trim(),
-          link_url: mediaType === 'text' ? (linkUrl.trim() || null) : null,
+          post_content: contentFor(platform),
+          link_url: linkFor(platform),
           scheduled_for: !publishNow && scheduledFor ? new Date(scheduledFor).toISOString() : null,
           media_type: mediaType !== 'text' ? mediaType : null,
-          media_url: finalMediaUrl,
-        })));
+          media_url: mediaFor(platform),
+          platform,
+          post_group_id: groupByPage.get(page.id) ?? null,
+        }))));
         if (!drafts.ok) throw new Error(drafts.summary);
         draftSummary = drafts.summary;
       }
 
-      // Create a post for each selected page
+      // Create a post for each selected page and platform
       const results = await Promise.all(
-        directPages.map(async (page) => {
+        directPages.flatMap((page) => singlePlatforms.map(async (platform) => {
           const payload = {
             facebook_page_id: page.facebook_page_id,
             franchise_name: page.location_name,
             location_number: page.location_number || null,
-            post_content: postContent.trim(),
-            link_url: mediaType === 'text' ? (linkUrl.trim() || null) : null,
+            post_content: contentFor(platform),
+            link_url: linkFor(platform),
             scheduled_for: publishNow ? null : (scheduledFor || null),
             publish_now: publishNow,
             media_type: mediaType !== 'text' ? mediaType : null,
-            media_url: finalMediaUrl,
+            media_url: mediaFor(platform),
+            platform,
+            post_group_id: groupByPage.get(page.id) ?? null,
             // Placeholder values
             city: page.city || null,
             base_url: page.base_url || null,
@@ -308,8 +419,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             body: JSON.stringify(payload),
           });
 
-          return { page: page.location_name, response };
-        })
+          return { page: platform === 'instagram' ? `${page.location_name} (Instagram)` : page.location_name, response };
+        }))
       );
 
       const failed = results.filter(r => !r.response.ok);
@@ -326,6 +437,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
       // Reset form
       setPostContent('');
+      setIgCaption('');
       setLinkUrl('');
       setScheduledFor('');
       setPublishNow(false);
@@ -367,13 +479,87 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   // Row ↔ file mapping (media_file column), recomputed as rows/files change
   const mediaMapping = useMemo(() => mapRowsToFiles(csvData, mediaFiles), [csvData, mediaFiles]);
-  const mediaErrorRows = mediaMapping.rows
-    .map((s, i) => (s.state === 'error' ? i : -1))
-    .filter((i) => i >= 0);
+
+  // Files that an Instagram row uses → prepare them for Instagram (JPEG derivative / video checks)
+  const igNeeded = useMemo(() => {
+    const need = new Map<File, 'photo' | 'video'>();
+    csvData.forEach((row, i) => {
+      const pp = parsePlatformsCell(row.platforms);
+      const ms = mediaMapping.rows[i];
+      if (pp.ok && pp.platforms.includes('instagram') && ms?.state === 'file') need.set(mediaFiles[ms.fileIndex], ms.kind);
+    });
+    return need;
+  }, [csvData, mediaMapping, mediaFiles]);
+
+  useEffect(() => {
+    // two at a time: large photos are decoded and re-encoded in the browser
+    for (const [file, kind] of Array.from(igNeeded.entries())) {
+      if (igInFlight.current.size >= 2) break;
+      if (igMedia.has(file) || igInFlight.current.has(file)) continue;
+      igInFlight.current.add(file);
+      analyzeInstagramMedia(file, kind).then((info) => {
+        igInFlight.current.delete(file);
+        if (!mediaFilesRef.current.includes(file)) { releaseIgMedia(info); return; } // removed meanwhile
+        setIgMedia((prev) => new Map(prev).set(file, info));
+      });
+    }
+  }, [igNeeded, igMedia]);
+
+  // Forget analyses (and their object URLs) for files that were removed
+  useEffect(() => {
+    setIgMedia((prev) => {
+      const stale = Array.from(prev.keys()).filter((f) => !mediaFiles.includes(f));
+      if (stale.length === 0) return prev;
+      const next = new Map(prev);
+      stale.forEach((f) => { releaseIgMedia(next.get(f)); next.delete(f); });
+      return next;
+    });
+  }, [mediaFiles]);
+
+  // Per-row checks: media mapping + platforms + Instagram rules. Errors block the upload.
+  const rowPlans: RowPlan[] = csvData.map((row, i) => {
+    const page = resolvePage(row);
+    const ms = mediaMapping.rows[i];
+    const pp = parsePlatformsCell(row.platforms);
+    const platforms = pp.ok ? pp.platforms : [];
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    if (!pp.ok) errors.push(pp.message);
+    if (ms?.state === 'error') errors.push(ms.message);
+    const igCaption = replacePlaceholders(row.ig_caption || row.post_content, pageValues(page));
+    let pending = false;
+    if (platforms.includes('instagram')) {
+      const media: IgTargetMedia = ms?.state === 'file'
+        ? { source: 'file', kind: ms.kind, prepared: preparedIssues(igMedia.get(mediaFiles[ms.fileIndex])) }
+        : ms?.state === 'url' ? { source: 'url', kind: ms.kind, url: row.media_url.trim() } : { source: 'none' };
+      const r = evaluateInstagramTarget({
+        caption: igCaption, pageFound: !!page, hasIgAccount: !!page?.ig_user_id, media,
+        direct: !!page && !needsApproval(page), instagramEnabled: igEnabled, hasSchedule: !!parseScheduledDate(row.scheduled_for),
+      });
+      errors.push(...r.errors.map((e) => `Instagram: ${e}`));
+      warnings.push(...r.warnings.map((w) => `Instagram: ${w}`));
+      pending = r.pending;
+    }
+    return { page, platforms, errors, warnings, pending, igCaption };
+  });
+  const errorRows = rowPlans.map((p, i) => (p.errors.length ? i : -1)).filter((i) => i >= 0);
+  const igPreparing = rowPlans.some((p) => p.pending);
+  const bulkIgCount = rowPlans.filter((p) => p.platforms.includes('instagram')).length;
 
   const removeErroredRows = () => {
-    const bad = new Set(mediaErrorRows);
+    const bad = new Set(errorRows);
     setCsvData((rows) => rows.filter((_, i) => !bad.has(i)));
+  };
+
+  /** Instagram preview media for a row: the cropped JPEG derivative, the video file, or the CSV link */
+  const igPreviewFor = (index: number, row: CSVRow): { url: string | null; ratio: number | null; note: string | null } => {
+    const ms = mediaMapping.rows[index];
+    if (ms?.state === 'url') return { url: row.media_url.trim(), ratio: null, note: null };
+    if (ms?.state !== 'file') return { url: null, ratio: null, note: null };
+    const info = igMedia.get(mediaFiles[ms.fileIndex]);
+    if (info?.state === 'photo') return { url: info.url, ratio: info.plan.ratio, note: info.plan.note || null };
+    if (info?.state === 'video') return { url: mediaObjectUrls[ms.fileIndex] || null, ratio: info.width && info.height ? info.width / info.height : null, note: null };
+    return { url: ms.kind === 'video' ? mediaObjectUrls[ms.fileIndex] || null : null, ratio: null, note: info ? null : 'Preparing Instagram version…' };
   };
 
   const clearBulk = () => {
@@ -394,31 +580,47 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         throw new Error('No CSV data to upload');
       }
       const statuses = mediaMapping.rows;
-      if (statuses.some((s) => s.state === 'error')) {
-        throw new Error('Fix or remove the rows with media problems first');
+      if (rowPlans.some((p) => p.errors.length > 0)) {
+        throw new Error('Fix or remove the rows with problems first');
       }
+      if (igPreparing) throw new Error('Still preparing Instagram media; try again in a moment');
 
-      // Upload each referenced file once (rows for unknown pages are skipped), straight to storage
-      const neededFiles = Array.from(new Set(
-        csvData.flatMap((row, i) => {
-          const s = statuses[i];
-          return s.state === 'file' && resolvePage(row) ? [s.fileIndex] : [];
+      // Upload each referenced file once (rows for unknown pages are skipped), straight to storage.
+      // Originals serve Facebook posts and Instagram videos; Instagram photos use their JPEG derivative.
+      const originalFiles = new Set<number>();
+      const igPhotoFiles = new Set<number>();
+      csvData.forEach((_, i) => {
+        const s = statuses[i];
+        const plan = rowPlans[i];
+        if (s.state !== 'file' || !plan.page) return;
+        if (plan.platforms.includes('facebook') || (plan.platforms.includes('instagram') && s.kind === 'video')) originalFiles.add(s.fileIndex);
+        if (plan.platforms.includes('instagram') && s.kind === 'photo') igPhotoFiles.add(s.fileIndex);
+      });
+      const uploads: { key: string; file: File }[] = [
+        ...Array.from(originalFiles).map((i) => ({ key: `orig:${i}`, file: mediaFiles[i] })),
+        ...Array.from(igPhotoFiles).map((i) => {
+          const info = igMedia.get(mediaFiles[i]);
+          if (info?.state !== 'photo') throw new Error(`Instagram version of ${mediaFiles[i].name} is not ready`);
+          return { key: `ig:${i}`, file: info.file };
         }),
-      ));
-      const refByFile = new Map<number, string>();
-      if (neededFiles.length > 0) {
+      ];
+      const refByKey = new Map<string, string>();
+      if (uploads.length > 0) {
         const purpose = csvData.some((row) => needsApproval(resolvePage(row))) ? 'draft' : 'direct';
         const refs = await uploadMediaFiles(
-          neededFiles.map((i) => mediaFiles[i]), purpose,
+          uploads.map((u) => u.file), purpose,
           (done, total) => setUploadProgress(`Uploading media ${done}/${total}…`),
         );
-        neededFiles.forEach((fileIndex, k) => refByFile.set(fileIndex, refs[k]));
+        uploads.forEach((u, k) => refByKey.set(u.key, refs[k]));
       }
       setUploadProgress(null);
 
-      const mediaFor = (index: number, row: CSVRow): { media_type: string | null; media_url: string | null } => {
+      const mediaFor = (index: number, row: CSVRow, platform: Platform): { media_type: string | null; media_url: string | null } => {
         const s = statuses[index];
-        if (s.state === 'file') return { media_type: s.kind, media_url: refByFile.get(s.fileIndex) || null };
+        if (s.state === 'file') {
+          const key = platform === 'instagram' && s.kind === 'photo' ? `ig:${s.fileIndex}` : `orig:${s.fileIndex}`;
+          return { media_type: s.kind, media_url: refByKey.get(key) || null };
+        }
         if (s.state === 'url') return { media_type: s.kind, media_url: row.media_url.trim() };
         return { media_type: null, media_url: null };
       };
@@ -428,54 +630,65 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       const draftRows: DraftPayload[] = [];
 
       for (const [index, row] of Array.from(csvData.entries())) {
-        const page = resolvePage(row);
+        const { page, platforms } = rowPlans[index];
 
         if (!page) {
           failedRows.push(`${row.location_number || row.location_name} (page not found)`);
           continue;
         }
-        const media = mediaFor(index, row);
+        // One CSV row for fb,ig → two posts sharing a post_group_id
+        const groupId = newGroupId(platforms);
 
-        // Approval-workflow clients: queue as drafts for internal → client review
-        if (needsApproval(page)) {
-          draftRows.push({
-            page_id: page.id,
-            post_content: row.post_content,
-            link_url: row.link_url || null,
+        for (const platform of platforms) {
+          const media = mediaFor(index, row, platform);
+          const content = platform === 'instagram' ? (row.ig_caption || row.post_content) : row.post_content;
+          const link = platform === 'facebook' && !media.media_type ? (row.link_url || null) : null;
+
+          // Approval-workflow clients: queue as drafts for internal → client review
+          if (needsApproval(page)) {
+            draftRows.push({
+              page_id: page.id,
+              post_content: content,
+              link_url: link,
+              scheduled_for: parseScheduledDate(row.scheduled_for),
+              media_type: media.media_type,
+              media_url: media.media_url,
+              platform,
+              post_group_id: groupId,
+            });
+            continue;
+          }
+
+          const payload = {
+            facebook_page_id: page.facebook_page_id,
+            franchise_name: page.location_name,
+            location_number: page.location_number || null,
+            post_content: content,
+            link_url: link,
             scheduled_for: parseScheduledDate(row.scheduled_for),
+            publish_now: false,
             media_type: media.media_type,
             media_url: media.media_url,
+            platform,
+            post_group_id: groupId,
+            // Placeholder values
+            city: page.city || null,
+            base_url: page.base_url || null,
+            phone: page.phone || null,
+          };
+
+          const response = await fetch('/api/posts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
           });
-          continue;
-        }
 
-        const payload = {
-          facebook_page_id: page.facebook_page_id,
-          franchise_name: page.location_name,
-          location_number: page.location_number || null,
-          post_content: row.post_content,
-          link_url: media.media_type ? null : (row.link_url || null),
-          scheduled_for: parseScheduledDate(row.scheduled_for),
-          publish_now: false,
-          media_type: media.media_type,
-          media_url: media.media_url,
-          // Placeholder values
-          city: page.city || null,
-          base_url: page.base_url || null,
-          phone: page.phone || null,
-        };
-
-        const response = await fetch('/api/posts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-
-        if (response.ok) {
-          successCount++;
-        } else {
-          const data = await response.json().catch(() => ({}));
-          failedRows.push(`${row.location_name || row.location_number} (${data.error || 'API error'})`);
+          if (response.ok) {
+            successCount++;
+          } else {
+            const data = await response.json().catch(() => ({}));
+            failedRows.push(`${row.location_name || row.location_number}${platform === 'instagram' ? ' (Instagram)' : ''} (${data.error || 'API error'})`);
+          }
         }
       }
 
@@ -621,6 +834,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         media_type: row.media_type || '',
         media_file: row.media_file || '',
         media_url: row.media_url || '',
+        platforms: row.platforms || '',
+        ig_caption: row.ig_caption || '',
       });
     }
 
@@ -652,7 +867,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const downloadTemplate = () => {
     // 'notes' is for people reading the file; the importer ignores columns it doesn't know.
-    const headers = ['location_number', 'location_name', 'post_content', 'link_url', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
+    const headers = ['location_number', 'location_name', 'platforms', 'post_content', 'ig_caption', 'link_url', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
     // One franchise example (matched on location_number) and non-franchise examples (blank
     // location_number, matched on the exact page name). Dates are 95+ days out so a test upload
     // can be reviewed and deleted long before it's due.
@@ -667,14 +882,16 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     // for every row and never creates posts on a real client page. Replace with real pages.
     const EXAMPLE_NOTE = 'EXAMPLE ROW: replace the page with a real one from the Pages tab (or delete this row).';
     const exampleRows = [
-      ['0001', 'Example Franchise Location A', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '{{BASEURL}}', daysOut(95, 9), '', '', '',
-        `FRANCHISE LOCATION, text + link: location_number is matched first (name is a fallback). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. ${EXAMPLE_NOTE}`],
-      ['0002', 'Example Franchise Location B', 'Photo post for {{CITY}}.', '', daysOut(95, 11), 'photo', 'example-photo.jpg', '',
+      ['0001', 'Example Franchise Location A', 'fb', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '', '{{BASEURL}}', daysOut(95, 9), '', '', '',
+        `FRANCHISE LOCATION, text + link: location_number is matched first (name is a fallback). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. platforms fb (or blank) = Facebook only. ${EXAMPLE_NOTE}`],
+      ['0002', 'Example Franchise Location B', 'fb', 'Photo post for {{CITY}}.', '', '', daysOut(95, 11), 'photo', 'example-photo.jpg', '',
         `FRANCHISE LOCATION, photo: media_file = the name of an image you upload together with this CSV (JPG/PNG/GIF/WEBP, max 10 MB). Several rows can use the same file. media_type can be left blank (detected from the file). link_url is ignored for photos. ${EXAMPLE_NOTE}`],
-      ['0003', 'Example Franchise Location C', 'Video post for {{CITY}}.', '', daysOut(96, 9), 'video', 'example-video.mp4', '',
+      ['0003', 'Example Franchise Location C', 'fb', 'Video post for {{CITY}}.', '', '', daysOut(96, 9), 'video', 'example-video.mp4', '',
         `FRANCHISE LOCATION, video: media_file = the name of a video you upload with this CSV (MP4/MOV, max 100 MB). Instead of a file you can put a public https link in media_url and leave media_file blank. ${EXAMPLE_NOTE}`],
-      ['', 'Example Brand Page', 'Text-only post for a non-franchise page.', '', daysOut(96, 11), '', '', '',
+      ['', 'Example Brand Page', 'fb', 'Text-only post for a non-franchise page.', '', '', daysOut(96, 11), '', '', '',
         `NON-FRANCHISE PAGE (e.g. IANA): leave location_number blank and put the page name exactly as on the Pages tab. Text only = leave link_url/media blank. Skip {{CITY}}/{{PHONE}}/{{BASEURL}} unless set for the page. ${EXAMPLE_NOTE}`],
+      ['0004', 'Example Franchise Location D', 'fb,ig', 'Photo post for {{CITY}} on Facebook. Learn more at {{BASEURL}}', 'Photo post for {{CITY}} on Instagram. Link in bio! #homecare #{{CITY}}', '', daysOut(97, 9), 'photo', 'example-photo.jpg', '',
+        `FACEBOOK + INSTAGRAM: platforms fb,ig makes two linked posts (Facebook and Instagram, reviewed side by side); ig = Instagram only. Instagram needs a photo or video and an Instagram account ID on the page (Pages tab). ig_caption is optional (blank = post_content); max 2,200 characters and 30 hashtags (5 or fewer recommended); links are not clickable on Instagram. Photos are converted to JPEG and center-cropped to 4:5-1.91:1 for Instagram (the Facebook post keeps the original); videos must be MP4/MOV, 3 s to 15 min, ideally 9:16. ${EXAMPLE_NOTE}`],
     ];
 
     const csv = [
@@ -691,49 +908,6 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
-
-  // Convert mm/dd/yyyy format to ISO format for database
-  const parseScheduledDate = (dateStr: string): string | null => {
-    if (!dateStr || !dateStr.trim()) return null;
-
-    // Try to parse mm/dd/yyyy or mm/dd/yyyy hh:mm AM/PM format
-    const dateTimeMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?)?$/i);
-
-    if (dateTimeMatch) {
-      const [, month, day, year, hours, minutes, ampm] = dateTimeMatch;
-      let hour = hours ? parseInt(hours, 10) : 9; // Default to 9 AM
-      const minute = minutes ? parseInt(minutes, 10) : 0;
-
-      // Convert to 24-hour format if AM/PM specified
-      if (ampm) {
-        if (ampm.toUpperCase() === 'PM' && hour !== 12) {
-          hour += 12;
-        } else if (ampm.toUpperCase() === 'AM' && hour === 12) {
-          hour = 0;
-        }
-      }
-
-      const date = new Date(
-        parseInt(year, 10),
-        parseInt(month, 10) - 1,
-        parseInt(day, 10),
-        hour,
-        minute
-      );
-
-      if (!isNaN(date.getTime())) {
-        return date.toISOString();
-      }
-    }
-
-    // Fallback: try ISO format
-    const isoDate = new Date(dateStr);
-    if (!isNaN(isoDate.getTime())) {
-      return isoDate.toISOString();
-    }
-
-    return null;
   };
 
   // Format ISO date to mm/dd/yyyy for display
@@ -821,6 +995,29 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 )}
               </div>
 
+              {/* Platforms */}
+              <fieldset>
+                <legend className="block text-sm font-medium text-gray-700 mb-2">Post to</legend>
+                <div className="flex flex-wrap gap-6">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={wantFb} onChange={(e) => setWantFb(e.target.checked)} className="w-4 h-4" disabled={submitting} />
+                    <span className="text-sm text-gray-700">Facebook</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={wantIg} onChange={(e) => setWantIg(e.target.checked)} className="w-4 h-4" disabled={submitting} />
+                    <span className="text-sm text-gray-700">Instagram</span>
+                  </label>
+                </div>
+                {wantIg && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    Instagram needs a photo or video and an Instagram account on each page (Pages tab). Photos are converted to JPEG and
+                    cropped to 4:5–1.91:1 for Instagram; Facebook keeps the original.
+                    {!igEnabled && ' Instagram publishing is not enabled yet: Instagram posts can be drafted for client approval but are not scheduled.'}
+                  </p>
+                )}
+                {!wantFb && !wantIg && <p className="mt-1 text-sm text-red-600">Choose at least one.</p>}
+              </fieldset>
+
               {/* Post Content */}
               <div>
                 <label htmlFor="content" className="block text-sm font-medium text-gray-700 mb-2">
@@ -860,6 +1057,25 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   </details>
                 </div>
               </div>
+
+              {wantIg && (
+                <div>
+                  <label htmlFor="igCaption" className="block text-sm font-medium text-gray-700 mb-2">
+                    Instagram caption (optional; blank uses the post content)
+                  </label>
+                  <textarea
+                    id="igCaption"
+                    value={igCaption}
+                    onChange={(e) => setIgCaption(e.target.value)}
+                    rows={4}
+                    aria-describedby="igCaptionMeter"
+                    className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                    placeholder="Instagram version of the text. Links aren't clickable on Instagram."
+                    disabled={submitting}
+                  />
+                  <IgCaptionMeter id="igCaptionMeter" caption={replacePlaceholders(igCaption.trim() || postContent, pageValues(selectedPages[0]))} />
+                </div>
+              )}
 
               {/* Media Type Selector */}
               <div>
@@ -1061,28 +1277,59 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               )}
 
               {/* In-platform preview (first selected page, placeholders filled) */}
-              {postContent.trim() && (
+              {postContent.trim() && singlePlatforms.length > 0 && (
                 <div className="border-t pt-6">
                   <h3 className="text-sm font-medium text-gray-700 mb-3">
-                    Facebook preview{selectedPages.length > 1 ? ` (showing ${selectedPages[0].location_name} of ${selectedPages.length} pages)` : ''}
+                    Preview{selectedPages.length > 1 ? ` (showing ${selectedPages[0].location_name} of ${selectedPages.length} pages)` : ''}
                   </h3>
-                  <div className="bg-[#f0f2f5] rounded-lg p-4">
+                  <div className={`bg-[#f0f2f5] rounded-lg p-4 grid gap-4 ${singlePlatforms.length > 1 ? 'lg:grid-cols-2' : ''}`}>
                     {(() => {
                       const pg = selectedPages[0];
-                      const vals = pg ? { city: pg.city, franchise_name: pg.location_name, location_number: pg.location_number, base_url: pg.base_url, phone: pg.phone } : {};
+                      const vals = pageValues(pg);
+                      const igMediaPreview = mediaType === 'text' ? null
+                        : mediaInputMode === 'url' ? mediaUrl
+                        : singleIg?.state === 'photo' ? singleIg.url : mediaType === 'video' ? previewUrl : null;
                       return (
-                        <FacebookPostPreview
-                          pageName={pg?.location_name || 'Your Page'}
-                          facebookPageId={pg?.facebook_page_id}
-                          content={replacePlaceholders(postContent, vals)}
-                          linkUrl={mediaType === 'text' ? replacePlaceholders(linkUrl, vals) || null : null}
-                          mediaType={mediaType !== 'text' ? mediaType : null}
-                          mediaUrl={mediaType === 'text' ? null : (mediaInputMode === 'url' ? mediaUrl : previewUrl)}
-                          scheduledFor={!publishNow && scheduledFor ? new Date(scheduledFor).toISOString() : null}
-                        />
+                        <>
+                          {wantFb && (
+                            <div className="space-y-1">
+                              <PlatformBadge platform="facebook" />
+                              <FacebookPostPreview
+                                pageName={pg?.location_name || 'Your Page'}
+                                facebookPageId={pg?.facebook_page_id}
+                                content={replacePlaceholders(postContent, vals)}
+                                linkUrl={mediaType === 'text' ? replacePlaceholders(linkUrl, vals) || null : null}
+                                mediaType={mediaType !== 'text' ? mediaType : null}
+                                mediaUrl={mediaType === 'text' ? null : (mediaInputMode === 'url' ? mediaUrl : previewUrl)}
+                                scheduledFor={!publishNow && scheduledFor ? new Date(scheduledFor).toISOString() : null}
+                              />
+                            </div>
+                          )}
+                          {wantIg && (
+                            <div className="space-y-1">
+                              <PlatformBadge platform="instagram" />
+                              <InstagramPostPreview
+                                username={pg?.ig_username || pg?.location_name || 'yourpage'}
+                                facebookPageId={pg?.facebook_page_id}
+                                caption={replacePlaceholders(igCaption.trim() || postContent, vals)}
+                                mediaType={mediaType !== 'text' ? mediaType : null}
+                                mediaUrl={igMediaPreview}
+                                aspectRatio={singleIg?.state === 'photo' ? singleIg.plan.ratio : singleIg?.state === 'video' && singleIg.height ? singleIg.width / singleIg.height : null}
+                                note={singleIg?.state === 'loading' ? 'Preparing Instagram version…' : singleIg?.state === 'photo' ? singleIg.plan.note || null : null}
+                              />
+                            </div>
+                          )}
+                        </>
                       );
                     })()}
                   </div>
+                </div>
+              )}
+
+              {wantIg && selectedPages.length > 0 && (singleIgCheck.errors.length > 0 || singleIgCheck.warnings.length > 0) && (
+                <div className="rounded-lg border px-4 py-3 text-sm space-y-1" role="status">
+                  {singleIgCheck.errors.map((e) => <p key={e} className="text-red-700">Instagram: {e}</p>)}
+                  {singleIgCheck.warnings.map((w) => <p key={w} className="text-amber-700">Instagram: {w}</p>)}
                 </div>
               )}
 
@@ -1163,6 +1410,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   disabled={
                     submitting ||
                     uploading ||
+                    singlePlatforms.length === 0 ||
+                    singleIgBlocked ||
                     selectedPageIds.length === 0 ||
                     !postContent.trim() ||
                     (mediaType !== 'text' && mediaInputMode === 'file' && !selectedFile) ||
@@ -1171,6 +1420,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   className={`px-6 py-2 rounded-lg font-medium text-white ${
                     submitting ||
                     uploading ||
+                    singlePlatforms.length === 0 ||
+                    singleIgBlocked ||
                     selectedPageIds.length === 0 ||
                     !postContent.trim() ||
                     (mediaType !== 'text' && mediaInputMode === 'file' && !selectedFile) ||
@@ -1300,9 +1551,17 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     </h3>
                     <button type="button" onClick={() => setShowBulkPreviews(!showBulkPreviews)}
                       className="text-sm text-blue-600 hover:text-blue-800">
-                      {showBulkPreviews ? 'Show table' : 'Show as Facebook posts'}
+                      {showBulkPreviews ? 'Show table' : 'Show previews'}
                     </button>
                   </div>
+                  {bulkIgCount > 0 && (
+                    <div className="bg-pink-50 border border-pink-100 rounded-lg px-4 py-3 mb-3 text-sm text-pink-900">
+                      <strong>Instagram</strong>: {bulkIgCount} row(s) include Instagram. Photos are converted to JPEG and center-cropped to
+                      4:5–1.91:1 for Instagram (shown in the previews); Facebook keeps the original file.
+                      {!igEnabled && ' Instagram publishing is not enabled yet, so Instagram posts are drafted for client approval but not scheduled.'}
+                      {igPreparing && ' Preparing Instagram media…'}
+                    </div>
+                  )}
                   {bulkApprovalCount > 0 && (
                     <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 mb-3 text-sm text-blue-900">
                       <span>
@@ -1314,25 +1573,45 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   {showBulkPreviews && (
                     <div className="bg-[#f0f2f5] rounded-lg p-4 grid gap-4 max-h-[720px] overflow-auto" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))' }}>
                       {csvData.map((row, index) => {
-                        const pg = resolvePage(row);
-                        const vals = pg ? { city: pg.city, franchise_name: pg.location_name, location_number: pg.location_number, base_url: pg.base_url, phone: pg.phone } : {};
+                        const plan = rowPlans[index];
+                        const pg = plan.page;
+                        const vals = pageValues(pg);
                         const ms = mediaMapping.rows[index];
                         const kind = ms && (ms.state === 'file' || ms.state === 'url') ? ms.kind : null;
                         // Real local file (object URL) when mapped; the CSV media_url otherwise
                         const previewMedia = ms?.state === 'file' ? mediaObjectUrls[ms.fileIndex] || null : ms?.state === 'url' ? row.media_url.trim() : null;
+                        const both = plan.platforms.length > 1;
+                        const ig = plan.platforms.includes('instagram') ? igPreviewFor(index, row) : null;
                         return (
-                          <div key={index}>
+                          <div key={index} className={both ? 'space-y-1' : undefined} style={both ? { gridColumn: '1 / -1' } : undefined}
+                            role={both ? 'group' : undefined} aria-label={both ? `Row ${index + 2}: Facebook and Instagram versions` : undefined}>
                             {!pg && <p className="text-xs text-red-600 mb-1">Row {index + 2}: page not found</p>}
-                            {ms?.state === 'error' && <p className="text-xs text-red-600 mb-1">Row {index + 2}: {ms.message}</p>}
-                            <FacebookPostPreview
-                              pageName={pg?.location_name || row.location_name || row.location_number}
-                              facebookPageId={pg?.facebook_page_id}
-                              content={replacePlaceholders(row.post_content, vals)}
-                              linkUrl={!kind ? replacePlaceholders(row.link_url, vals) || null : null}
-                              mediaType={kind}
-                              mediaUrl={previewMedia}
-                              scheduledFor={parseScheduledDate(row.scheduled_for)}
-                            />
+                            {plan.errors.map((e) => <p key={e} className="text-xs text-red-600 mb-1">Row {index + 2}: {e}</p>)}
+                            {plan.warnings.map((w) => <p key={w} className="text-xs text-amber-700 mb-1">Row {index + 2}: {w}</p>)}
+                            <div className={both ? 'grid gap-4 md:grid-cols-2' : undefined}>
+                              {plan.platforms.includes('facebook') && (
+                                <FacebookPostPreview
+                                  pageName={pg?.location_name || row.location_name || row.location_number}
+                                  facebookPageId={pg?.facebook_page_id}
+                                  content={replacePlaceholders(row.post_content, vals)}
+                                  linkUrl={!kind ? replacePlaceholders(row.link_url, vals) || null : null}
+                                  mediaType={kind}
+                                  mediaUrl={previewMedia}
+                                  scheduledFor={parseScheduledDate(row.scheduled_for)}
+                                />
+                              )}
+                              {ig && (
+                                <InstagramPostPreview
+                                  username={pg?.ig_username || pg?.location_name || row.location_name || row.location_number}
+                                  facebookPageId={pg?.facebook_page_id}
+                                  caption={plan.igCaption}
+                                  mediaType={kind}
+                                  mediaUrl={ig.url}
+                                  aspectRatio={ig.ratio}
+                                  note={ig.note}
+                                />
+                              )}
+                            </div>
                           </div>
                         );
                       })}
@@ -1346,6 +1625,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                           <tr>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location #</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location Name</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Platforms</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Content</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Media</th>
@@ -1357,16 +1637,26 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                             const ms = mediaMapping.rows[index];
                             const file = ms && (ms.state === 'file' || ms.state === 'error') && ms.fileIndex !== undefined ? mediaFiles[ms.fileIndex] : undefined;
                             const thumb = ms && ms.state === 'file' ? mediaObjectUrls[ms.fileIndex] : undefined;
+                            const plan = rowPlans[index];
                             return (
-                            <tr key={index} className={ms?.state === 'error' ? 'bg-red-50' : undefined}>
+                            <tr key={index} className={plan.errors.length ? 'bg-red-50' : undefined}>
                               <td className="px-4 py-2 text-sm text-gray-900 whitespace-nowrap">
                                 {row.location_number || '-'}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-900 whitespace-nowrap">
                                 {row.location_name || '-'}
                               </td>
-                              <td className="px-4 py-2 text-sm text-gray-600 max-w-xs truncate">
-                                {row.post_content}
+                              <td className="px-4 py-2 text-sm whitespace-nowrap">
+                                <span className="inline-flex gap-1">
+                                  {plan.platforms.map((p) => <PlatformBadge key={p} platform={p} />)}
+                                  {plan.platforms.length === 0 && <span className="text-red-700">?</span>}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2 text-sm text-gray-600 max-w-xs">
+                                <div className="truncate">{row.post_content}</div>
+                                {plan.errors.map((e) => <div key={e} className="text-xs text-red-700 whitespace-normal">{e}</div>)}
+                                {plan.warnings.map((w) => <div key={w} className="text-xs text-amber-700 whitespace-normal">{w}</div>)}
+                                {plan.pending && <div className="text-xs text-gray-500">Preparing Instagram media…</div>}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-500 whitespace-nowrap">
                                 {ms && ms.state !== 'error' ? mediaStatusLabel(ms) : (row.media_type || 'text')}
@@ -1409,15 +1699,15 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 </div>
               )}
 
-              {mediaErrorRows.length > 0 && (
+              {errorRows.length > 0 && (
                 <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg text-sm flex items-center justify-between gap-4">
                   <span>
-                    {mediaErrorRows.length} row(s) have media problems (rows {mediaErrorRows.slice(0, 8).map((i) => i + 2).join(', ')}{mediaErrorRows.length > 8 ? '…' : ''}).
+                    {errorRows.length} row(s) have problems (rows {errorRows.slice(0, 8).map((i) => i + 2).join(', ')}{errorRows.length > 8 ? '…' : ''}).
                     Add the missing files or fix the CSV, or leave those rows out.
                   </span>
                   <button type="button" onClick={removeErroredRows} disabled={submitting}
                     className="shrink-0 px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-100">
-                    Leave out {mediaErrorRows.length} row(s)
+                    Leave out {errorRows.length} row(s)
                   </button>
                 </div>
               )}
@@ -1426,9 +1716,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               <div className="flex justify-end">
                 <button
                   onClick={handleBulkSubmit}
-                  disabled={submitting || csvData.length === 0 || mediaErrorRows.length > 0}
+                  disabled={submitting || csvData.length === 0 || errorRows.length > 0 || igPreparing}
+                  title={igPreparing ? 'Preparing Instagram media…' : undefined}
                   className={`px-6 py-2 rounded-lg font-medium text-white ${
-                    submitting || csvData.length === 0 || mediaErrorRows.length > 0
+                    submitting || csvData.length === 0 || errorRows.length > 0 || igPreparing
                       ? 'bg-gray-400 cursor-not-allowed'
                       : 'bg-blue-600 hover:bg-blue-700'
                   }`}
@@ -1453,7 +1744,9 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 <ul className="text-sm text-gray-600 space-y-1">
                   <li>• <strong>location_number</strong> (optional): Location number to match - takes priority over location_name</li>
                   <li>• <strong>location_name</strong> (optional): Location name - used if location_number not provided</li>
+                  <li>• <strong>platforms</strong> (optional): <code>fb</code>, <code>ig</code> or <code>fb,ig</code> (facebook/instagram also work). Blank = Facebook only. <code>fb,ig</code> creates two linked posts that are reviewed side by side</li>
                   <li>• <strong>post_content</strong> (required): The text content of your post</li>
+                  <li>• <strong>ig_caption</strong> (optional): Instagram caption; blank uses post_content (placeholders work in both). Max 2,200 characters and 30 hashtags</li>
                   <li>• <strong>link_url</strong> (optional): URL to include with text posts (ignored for photo/video)</li>
                   <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
                   <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;. With media_file it can be left blank (detected from the file)</li>
@@ -1466,6 +1759,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   Media: {MEDIA_HELP} Files are checked against the CSV before anything is created; rows with a missing file,
                   a type mismatch or an oversized file block the upload until fixed or left out. Uploaded media stays private
                   until the post is scheduled.
+                </p>
+                <p className="text-sm text-gray-500 mt-1">
+                  Instagram: needs a photo or video and an Instagram account ID on the page (Pages tab); text-only posts aren&apos;t possible.
+                  Photos are converted to JPEG (max 1440 px wide) and center-cropped to 4:5–1.91:1 when needed; the Facebook post keeps the
+                  original. Videos: MP4/MOV, 3 s to 15 min, 9:16 recommended. Links in captions are not clickable; more than 5 hashtags gets a warning.
+                  {!igEnabled && ' Instagram publishing is not enabled yet: Instagram posts go through client approval but are held back when the batch is scheduled.'}
                 </p>
                 <p className="text-sm text-gray-500 mt-1">
                   Non-franchise pages (e.g. IANA): leave location_number blank and enter the page name exactly as it appears on the Pages tab.

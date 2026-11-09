@@ -237,6 +237,63 @@ export interface IgPostInput {
   mediaKind: IgMediaKind | null;
 }
 
+export type IgTargetMedia =
+  | { source: 'none' }
+  /** uploaded file; `prepared` is the browser analysis (undefined while it runs) */
+  | { source: 'file'; kind: IgMediaKind; prepared?: { errors: string[]; warnings: string[] } }
+  | { source: 'url'; kind: IgMediaKind; url: string };
+
+export interface IgTargetInput {
+  caption: string;          // placeholders already filled in
+  pageFound: boolean;
+  hasIgAccount: boolean;
+  media: IgTargetMedia;
+  /** true when the page's client is NOT on the approval workflow (row goes straight to /api/posts) */
+  direct: boolean;
+  instagramEnabled: boolean;
+  hasSchedule: boolean;
+  publishNow?: boolean;
+}
+
+/**
+ * Everything the create form checks for one Instagram post (CSV row or single-post page) before
+ * anything is uploaded. `pending` = media analysis still running (block submit until done).
+ */
+export function evaluateInstagramTarget(input: IgTargetInput): Issues & { pending: boolean } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  let pending = false;
+  const m = input.media;
+  const base = validateInstagramPost({
+    caption: input.caption,
+    hasIgAccount: input.hasIgAccount || !input.pageFound, // "page not found" is reported separately
+    mediaKind: m.source === 'none' ? null : m.kind,
+  });
+  errors.push(...base.errors);
+  warnings.push(...base.warnings);
+  if (m.source === 'file') {
+    if (!m.prepared) pending = true;
+    else { errors.push(...m.prepared.errors); warnings.push(...m.prepared.warnings); }
+  } else if (m.source === 'url') {
+    if (!isInstagramMediaUrl(m.url, m.kind)) {
+      errors.push(m.kind === 'video'
+        ? 'Instagram needs an https link to an .mp4 or .mov video'
+        : 'Instagram needs an https link to a .jpg photo (or upload the file with the CSV so it is converted)');
+    } else if (m.kind === 'photo') {
+      warnings.push("Linked photo can't be checked here; it must be 4:5 to 1.91:1 or Instagram rejects it");
+    }
+  }
+  if (input.direct) {
+    if (!input.instagramEnabled) {
+      errors.push("Instagram publishing isn't enabled yet; for now Instagram posts only go through the client approval workflow");
+    } else {
+      if (input.publishNow) errors.push("Instagram posts can't be published immediately; schedule them");
+      else if (!input.hasSchedule) errors.push('Instagram posts need a schedule date');
+    }
+  }
+  return { errors, warnings, pending };
+}
+
 export function validateInstagramPost(input: IgPostInput): Issues {
   const errors: string[] = [];
   if (!input.hasIgAccount) errors.push('This page has no Instagram account set (Pages tab → Edit → Instagram account ID)');

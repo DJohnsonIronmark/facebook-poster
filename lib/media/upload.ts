@@ -12,7 +12,26 @@ interface UploadTarget {
   content_type: string;
 }
 
+// /api/media/upload-urls accepts at most 200 files per request
+const MAX_FILES_PER_REQUEST = 200;
+
 export async function uploadMediaFiles(
+  files: File[],
+  purpose: 'draft' | 'direct',
+  onProgress?: (done: number, total: number) => void,
+): Promise<string[]> {
+  if (files.length <= MAX_FILES_PER_REQUEST) return uploadChunk(files, purpose, onProgress);
+  const refs: string[] = [];
+  for (let i = 0; i < files.length; i += MAX_FILES_PER_REQUEST) {
+    const offset = i;
+    const chunk = await uploadChunk(files.slice(i, i + MAX_FILES_PER_REQUEST), purpose,
+      (done) => onProgress?.(offset + done, files.length));
+    refs.push(...chunk);
+  }
+  return refs;
+}
+
+async function uploadChunk(
   files: File[],
   purpose: 'draft' | 'direct',
   onProgress?: (done: number, total: number) => void,
