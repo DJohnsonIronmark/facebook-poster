@@ -242,7 +242,11 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
             canApproveForClient={isAdmin || (!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase())}
             onChanged={load}
             onAction={async (action) => {
-              const data = await act(batch, action);
+              // approve_internal sends the drafts on screen, so drafts that joined the batch after the
+              // account manager loaded it are never approved unseen (the server asks for a refresh).
+              const data = await act(batch, action, action === 'approve_internal'
+                ? { post_ids: (batch.posts || []).filter((p) => p.status === 'internal_review').map((p) => p.id) }
+                : {});
               if (!data) return;
               if (action === 'approve_internal' || action === 'resend_link') {
                 setBanner({

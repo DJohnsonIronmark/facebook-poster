@@ -102,8 +102,16 @@ function layout(heading: string, body: string, ctaUrl: string, ctaLabel: string,
 /** Step 1: team member uploaded first drafts → account manager reviews (cc the uploader) */
 export function notifyDraftsReady(opts: {
   accountManager: string | null; clientName: string; batchName: string; postCount: number; uploadedBy: string; baseUrl: string;
+  /** true when these drafts were added to a batch that was already waiting for review */
+  addedToExisting?: boolean;
+  /** posts in the batch after this upload */
+  batchTotal?: number;
 }): Promise<EmailResult> {
-  const body = `<p>${opts.postCount} first-draft Facebook post${opts.postCount === 1 ? '' : 's'} for <strong>${escapeHtml(opts.clientName)}</strong> (${escapeHtml(opts.batchName)}) ${opts.postCount === 1 ? 'is' : 'are'} ready for your review.</p>
+  const plural = opts.postCount === 1 ? '' : 's';
+  const lead = opts.addedToExisting
+    ? `<p>${opts.postCount} more first-draft post${plural} for <strong>${escapeHtml(opts.clientName)}</strong> ${opts.postCount === 1 ? 'was' : 'were'} added to <strong>${escapeHtml(opts.batchName)}</strong>${opts.batchTotal ? ` (now ${opts.batchTotal} post${opts.batchTotal === 1 ? '' : 's'})` : ''}, which is waiting for your review.</p>`
+    : `<p>${opts.postCount} first-draft post${plural} for <strong>${escapeHtml(opts.clientName)}</strong> (${escapeHtml(opts.batchName)}) ${opts.postCount === 1 ? 'is' : 'are'} ready for your review.</p>`;
+  const body = `${lead}
   <p>Review and edit as needed, then approve to send ${opts.postCount === 1 ? 'it' : 'them'} to the client.</p>
   <p style="color:#65676b">Uploaded by ${escapeHtml(opts.uploadedBy)}</p>`;
   return sendEmail({

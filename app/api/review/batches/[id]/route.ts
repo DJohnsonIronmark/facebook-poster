@@ -97,11 +97,25 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       if (recipients.length === 0) return err('No client reviewer emails configured for this client. Add them under Client settings.');
       if (senderProblem) return err(senderProblem);
 
+      // Uploads can add drafts to a batch while it waits for the account manager. Only the drafts the
+      // account manager had on screen (post_ids) may go to the client; if any arrived since, refresh first.
+      const pendingIds: string[] = posts.filter((x) => x.status === 'internal_review').map((x) => String(x.id));
+      const seen = Array.isArray(body.post_ids) ? new Set(body.post_ids.map((x: unknown) => String(x))) : null;
+      if (!seen) return err('Refresh the page and approve again (this screen is out of date).', 409);
+      const unseen = pendingIds.filter((id) => !seen.has(id));
+      if (unseen.length > 0) {
+        return err(`${unseen.length} new draft${unseen.length === 1 ? ' was' : 's were'} added to this batch since you opened it. Refresh to review ${unseen.length === 1 ? 'it' : 'them'}, then approve.`, 409);
+      }
+      const approveIds = pendingIds.filter((id) => seen.has(id));
+      if (approveIds.length === 0) return err('Batch has no drafts awaiting review');
+
       if (!(await claim(['internal_review'], { status: 'client_review', internal_approved_by_email: user.email, internal_approved_at: now }))) {
         return err('Someone else already moved this batch. Refresh and try again.', 409);
       }
+      // Only the approved ids: a draft inserted in the last instant stays internal_review, and the upload
+      // route moves it to a fresh internal-review batch when it sees this batch has left internal review.
       const p = await supabase.from('facebook_scheduled_posts')
-        .update({ status: 'client_review' }).eq('review_batch_id', batch.id).eq('status', 'internal_review');
+        .update({ status: 'client_review' }).in('id', approveIds).eq('review_batch_id', batch.id).eq('status', 'internal_review');
       const link = p.error ? null : await issueLinkAndEmail();
       if (!link) {
         // roll back so the batch isn't stuck in client_review without a link

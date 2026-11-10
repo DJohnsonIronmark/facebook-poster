@@ -50,16 +50,24 @@ const pageValues = (pg: FacebookPage | null | undefined) =>
 const newGroupId = (platforms: Platform[]) => (platforms.length > 1 ? crypto.randomUUID() : null);
 
 // Sends rows for approval-enabled clients into the review queue; returns a human summary
-async function submitDrafts(rows: DraftPayload[]): Promise<{ ok: boolean; summary: string }> {
+// By default drafts join the client's open batch (still in internal review) so the client gets one link.
+interface DraftBatchOptions { batchName: string; newBatch: boolean }
+
+async function submitDrafts(rows: DraftPayload[], opts: DraftBatchOptions): Promise<{ ok: boolean; summary: string }> {
   const res = await fetch('/api/review/drafts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rows }),
+    body: JSON.stringify({ rows, batch_name: opts.batchName.trim() || undefined, new_batch: opts.newBatch }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) return { ok: false, summary: data.error || 'Failed to submit drafts for review' };
-  const batches: { client: string; posts: number; email: string }[] = data.batches || [];
-  const parts = batches.map((b) => `${b.client}: ${b.posts} draft(s)${b.email === 'sent' ? ', team notified' : ' (notification email not sent)'}`);
+  const batches: { client: string; posts: number; email: string; joined?: boolean; batch_name?: string; batch_posts?: number }[] = data.batches || [];
+  const parts = batches.map((b) => {
+    const where = b.joined
+      ? `added ${b.posts} draft(s) to open batch "${b.batch_name}" (now ${b.batch_posts ?? b.posts})`
+      : `${b.posts} draft(s) in new batch "${b.batch_name || b.client}"`;
+    return `${b.client}: ${where}${b.email === 'sent' ? ', team notified' : ' (notification email not sent)'}`;
+  });
   const skipped: { row: number; reason: string }[] = data.skipped || [];
   if (skipped.length) parts.push(`${skipped.length} skipped (${skipped.slice(0, 3).map((s) => `row ${s.row}: ${s.reason}`).join('; ')})`);
   return { ok: batches.length > 0, summary: `Sent to approval: ${parts.join(' · ')}` };
@@ -110,6 +118,9 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [linkUrl, setLinkUrl] = useState('');
   const [scheduledFor, setScheduledFor] = useState('');
   const [publishNow, setPublishNow] = useState(false);
+  // Review batch options for approval-workflow clients (shared by single post and bulk upload)
+  const [draftBatchName, setDraftBatchName] = useState('');
+  const [startNewBatch, setStartNewBatch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -453,7 +464,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           media_url: mediaFor(platform),
           platform,
           post_group_id: groupByPage.get(page.id) ?? null,
-        }))));
+        }))), { batchName: draftBatchName, newBatch: startNewBatch });
         if (!drafts.ok) throw new Error(drafts.summary);
         draftSummary = drafts.summary;
       }
@@ -539,6 +550,33 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     }
     return page;
   };
+
+  // Shown inside both "Client approval workflow" notices
+  const batchOptions = (
+    <div className="mt-2 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+      <label className="flex items-center gap-2">
+        <span className="whitespace-nowrap">Batch name (optional)</span>
+        <input
+          type="text"
+          value={draftBatchName}
+          onChange={(e) => setDraftBatchName(e.target.value)}
+          maxLength={120}
+          placeholder="e.g. December posts"
+          className="border border-blue-200 rounded px-2 py-1 text-sm bg-white text-gray-900 w-48"
+          disabled={submitting}
+        />
+      </label>
+      <label className="flex items-center gap-2">
+        <input type="checkbox" checked={startNewBatch} onChange={(e) => setStartNewBatch(e.target.checked)} disabled={submitting} />
+        <span>Start a new review batch</span>
+      </label>
+      <span className="text-xs text-blue-800">
+        {startNewBatch
+          ? 'These drafts get their own batch and review link.'
+          : 'Added to the client\'s open batch if one is still in internal review (one review link); otherwise a new batch. The name only applies to a new batch.'}
+      </span>
+    </div>
+  );
 
   const bulkApprovalCount = csvData.filter(r => {
     const p = resolvePage(r);
@@ -796,7 +834,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       let draftSummary = '';
       let draftsOk = false;
       if (draftRows.length > 0) {
-        const drafts = await submitDrafts(draftRows);
+        const drafts = await submitDrafts(draftRows, { batchName: draftBatchName, newBatch: startNewBatch });
         draftsOk = drafts.ok;
         if (drafts.ok) draftSummary = drafts.summary;
         else failedRows.push(`${draftRows.length} approval draft(s): ${drafts.summary}`);
@@ -1601,6 +1639,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     {selectedPages.filter(p => p.client_id && approvalClientIds.has(p.client_id)).length} selected page(s) belong to clients that require review.
                     They&apos;ll be saved as drafts for internal review instead of {publishNow ? 'publishing' : 'scheduling'}.
                   </span>
+                  {batchOptions}
                 </div>
               )}
 
@@ -1777,6 +1816,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                         <strong>Client approval workflow</strong>: {bulkApprovalCount} of {csvData.length} row(s) are for clients that require review.
                         They&apos;ll be grouped into one review batch per client and the internal team member on each client will be alerted.
                       </span>
+                      {batchOptions}
                     </div>
                   )}
                   {showBulkPreviews && (

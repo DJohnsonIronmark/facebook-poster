@@ -24,7 +24,11 @@ async function resolveBatch(token: string) {
   if (!data) return { supabase, batch: null };
   if (!data.client_token_expires_at || new Date(data.client_token_expires_at) < new Date()) return { supabase, batch: null };
   if (!['client_review', 'client_approved'].includes(data.status)) return { supabase, batch: null };
-  return { supabase, batch: data as any };
+  // Never show the client a draft the account manager hasn't approved (one can briefly sit in this
+  // batch if an upload joined it as the account manager approved; the upload route moves it out).
+  const batch = data as any;
+  batch.posts = (batch.posts || []).filter((p: { status?: string }) => p.status !== 'internal_review');
+  return { supabase, batch };
 }
 
 const notFound = () =>

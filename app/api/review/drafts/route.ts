@@ -64,7 +64,38 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
   return out;
 }
 
-// POST - bulk-create drafts for approval-enabled clients (one review batch per client)
+/** The client's most recent batch still in internal review (null when none). */
+async function findOpenBatch(supabase: ReturnType<typeof createServiceClient>, clientId: string): Promise<{ id: string; name: string } | null> {
+  const { data, error } = await supabase
+    .from('fb_review_batches')
+    .select('id, name')
+    .eq('client_id', clientId)
+    .eq('status', 'internal_review')
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (error) {
+    console.error('drafts: open batch lookup', error);
+    return null;
+  }
+  const row = (data || [])[0];
+  return row ? { id: String(row.id), name: String(row.name) } : null;
+}
+
+async function createBatch(supabase: ReturnType<typeof createServiceClient>, clientId: string, name: string, email: string): Promise<{ id: string; name: string } | null> {
+  const { data, error } = await supabase
+    .from('fb_review_batches')
+    .insert({ client_id: clientId, name, status: 'internal_review', created_by_email: email })
+    .select('id, name')
+    .single();
+  if (error || !data) {
+    console.error('drafts: batch insert', error);
+    return null;
+  }
+  return { id: String(data.id), name: String(data.name) };
+}
+
+// POST - bulk-create drafts for approval-enabled clients. By default each client's drafts join its open
+// (internal review) batch, so one client = one review link; new_batch: true starts a separate batch.
 export async function POST(request: NextRequest) {
   const { user, error: authError } = await requireRole(['admin', 'manager']);
   if (authError || !user) return authError!;
@@ -72,6 +103,9 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const rows: DraftRow[] = Array.isArray(body.rows) ? body.rows : [];
   const batchLabel = typeof body.batch_name === 'string' ? body.batch_name.trim().slice(0, 120) : '';
+  // Default: new drafts join the client's open batch (still in internal review) so the client gets one
+  // review link. new_batch: true always starts a separate batch.
+  const forceNewBatch = body.new_batch === true;
   if (rows.length === 0) return NextResponse.json({ error: 'No rows provided' }, { status: 400 });
   if (rows.length > MAX_ROWS) return NextResponse.json({ error: `Max ${MAX_ROWS} rows per upload` }, { status: 400 });
 
@@ -139,20 +173,22 @@ export async function POST(request: NextRequest) {
 
   const baseUrl = appBaseUrl(request);
   const dateLabel = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  const results: { batch_id: string; client: string; posts: number; email: EmailResult }[] = [];
+  const results: { batch_id: string; client: string; posts: number; joined: boolean; batch_name: string; batch_posts: number; email: EmailResult }[] = [];
 
   for (const { client, rows: clientRows } of Array.from(byClient.values())) {
-    const name = `${client.name} – ${batchLabel || dateLabel}`;
-    const { data: batch, error: batchErr } = await supabase
-      .from('fb_review_batches')
-      .insert({ client_id: client.id, name, status: 'internal_review', created_by_email: user.email })
-      .select('id')
-      .single();
-    if (batchErr || !batch) {
-      console.error('drafts: batch insert', batchErr);
-      clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'failed to create review batch' }));
-      continue;
+    // Only a batch still in INTERNAL review is joined: the client never sees drafts the account manager
+    // hasn't approved. Once a batch is with the client (or later), new uploads start a new batch.
+    const open = forceNewBatch ? null : await findOpenBatch(supabase, client.id);
+    let batch: { id: string; name: string } | null = open;
+    const joined = !!open;
+    if (!batch) {
+      batch = await createBatch(supabase, client.id, `${client.name} – ${batchLabel || dateLabel}`, user.email);
+      if (!batch) {
+        clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'failed to create review batch' }));
+        continue;
+      }
     }
+    const batchId: string = batch.id;
 
     const postRecords = await mapLimit(clientRows, 5, async ({ row, page, platform, groupId }) => {
       const values = {
@@ -174,7 +210,7 @@ export async function POST(request: NextRequest) {
         media_url: mediaType ? String(row.media_url || '').trim() || null : null,
         scheduled_for: scheduled && !isNaN(scheduled.getTime()) ? scheduled.toISOString() : null,
         status: 'internal_review',
-        review_batch_id: batch.id,
+        review_batch_id: batchId,
         client_id: client.id,
         platform,
         post_group_id: groupId,
@@ -188,10 +224,37 @@ export async function POST(request: NextRequest) {
       .select('id, post_content, link_url, media_url');
     if (postErr || !inserted) {
       console.error('drafts: posts insert', postErr);
-      await supabase.from('fb_review_batches').delete().eq('id', batch.id);
+      if (!joined) await supabase.from('fb_review_batches').delete().eq('id', batchId);
       clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'failed to save post' }));
       continue;
     }
+
+    // Race: if the account manager approved the open batch while we were inserting, these drafts must
+    // not ride along to the client unreviewed. Move them to a fresh internal-review batch.
+    let finalBatch = batch;
+    let finalJoined = joined;
+    if (joined) {
+      const { data: now } = await supabase.from('fb_review_batches').select('status').eq('id', batchId).single();
+      if (!now || now.status !== 'internal_review') {
+        const fresh = await createBatch(supabase, client.id, `${client.name} – ${batchLabel || dateLabel}`, user.email);
+        const ids = inserted.map((p: { id: string }) => p.id);
+        if (fresh) {
+          await supabase.from('facebook_scheduled_posts').update({ review_batch_id: fresh.id }).in('id', ids).eq('status', 'internal_review');
+          finalBatch = fresh;
+        } else {
+          // Could not create a batch: unlink rather than leave unreviewed drafts in a client-facing batch
+          await supabase.from('facebook_scheduled_posts').update({ review_batch_id: null }).in('id', ids).eq('status', 'internal_review');
+          clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'review batch changed during upload; please upload again' }));
+          continue;
+        }
+        finalJoined = false;
+      } else {
+        await supabase.from('fb_review_batches').update({ updated_at: new Date().toISOString() }).eq('id', batchId);
+      }
+    }
+
+    const { count: batchPosts } = await supabase
+      .from('facebook_scheduled_posts').select('id', { count: 'exact', head: true }).eq('review_batch_id', finalBatch.id);
 
     await supabase.from('fb_post_revisions').insert(
       inserted.map((p: any) => ({
@@ -201,9 +264,13 @@ export async function POST(request: NextRequest) {
 
     const email = await notifyDraftsReady({
       accountManager: client.account_manager_email,
-      clientName: client.name, batchName: name, postCount: inserted.length, uploadedBy: user.email, baseUrl,
+      clientName: client.name, batchName: finalBatch.name, postCount: inserted.length, uploadedBy: user.email, baseUrl,
+      addedToExisting: finalJoined, batchTotal: batchPosts ?? inserted.length,
     });
-    results.push({ batch_id: batch.id, client: client.name, posts: inserted.length, email });
+    results.push({
+      batch_id: finalBatch.id, client: client.name, posts: inserted.length, joined: finalJoined,
+      batch_name: finalBatch.name, batch_posts: batchPosts ?? inserted.length, email,
+    });
   }
 
   return NextResponse.json({ success: results.length > 0, batches: results, skipped });
