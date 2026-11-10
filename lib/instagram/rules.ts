@@ -8,7 +8,8 @@
 //   * every post needs a photo or video (no text-only posts) and an IG Business/Creator account
 //     linked to the Facebook Page
 
-export type Platform = 'facebook' | 'instagram';
+export type Platform = 'facebook' | 'instagram' | 'linkedin' | 'x';
+export const ALL_PLATFORMS: Platform[] = ['facebook', 'instagram', 'linkedin', 'x'];
 export type IgMediaKind = 'photo' | 'video';
 
 export const IG_CAPTION_MAX = 2200;
@@ -25,7 +26,7 @@ export const IG_REELS_RATIO = 9 / 16;
 export const IG_USER_ID_RE = /^\d{5,25}$/;
 export const IG_USERNAME_RE = /^[A-Za-z0-9._]{1,30}$/;
 
-export const PLATFORM_LABEL: Record<Platform, string> = { facebook: 'Facebook', instagram: 'Instagram' };
+export const PLATFORM_LABEL: Record<Platform, string> = { facebook: 'Facebook', instagram: 'Instagram', linkedin: 'LinkedIn', x: 'X' };
 
 // ---------------------------------------------------------------------------------------------
 // Platforms
@@ -33,7 +34,11 @@ export const PLATFORM_LABEL: Record<Platform, string> = { facebook: 'Facebook', 
 const PLATFORM_ALIASES: Record<string, Platform> = {
   fb: 'facebook', facebook: 'facebook',
   ig: 'instagram', insta: 'instagram', instagram: 'instagram',
+  li: 'linkedin', linkedin: 'linkedin',
+  x: 'x', twitter: 'x', tw: 'x',
 };
+
+const PLATFORMS_HINT = 'must be any of fb, ig, li, x (e.g. fb,ig,li,x)';
 
 export type PlatformsCell = { ok: true; platforms: Platform[] } | { ok: false; message: string };
 
@@ -49,11 +54,11 @@ export function parsePlatformsCell(value: string | null | undefined): PlatformsC
   const found = new Set<Platform>();
   for (const t of tokens) {
     const p = PLATFORM_ALIASES[t];
-    if (!p) return { ok: false, message: `platforms "${raw}" must be fb, ig or fb,ig` };
+    if (!p) return { ok: false, message: `platforms "${raw}" ${PLATFORMS_HINT}` };
     found.add(p);
   }
-  const platforms = (['facebook', 'instagram'] as Platform[]).filter((p) => found.has(p));
-  return platforms.length ? { ok: true, platforms } : { ok: false, message: `platforms "${raw}" must be fb, ig or fb,ig` };
+  const platforms = ALL_PLATFORMS.filter((p) => found.has(p));
+  return platforms.length ? { ok: true, platforms } : { ok: false, message: `platforms "${raw}" ${PLATFORMS_HINT}` };
 }
 
 /** Server-side: a row's `platform` field. Missing/blank = facebook (legacy callers); anything unknown = null (reject). */
@@ -61,17 +66,23 @@ export function normalizePlatform(value: unknown): Platform | null {
   if (value === undefined || value === null || value === '') return 'facebook';
   if (typeof value !== 'string') return null;
   const v = value.trim().toLowerCase();
-  if (v === 'facebook' || v === 'instagram') return v;
+  if (v === 'facebook' || v === 'instagram' || v === 'linkedin' || v === 'x') return v;
   return null;
 }
 
 /** Platform of a stored row; rows from before the migration (no column) are Facebook. */
 export function rowPlatform(row: { platform?: string | null }): Platform {
-  return row.platform === 'instagram' ? 'instagram' : 'facebook';
+  const p = row.platform;
+  return p === 'instagram' || p === 'linkedin' || p === 'x' ? p : 'facebook';
 }
 
 /** The server-side switch. Off unless INSTAGRAM_PUBLISHING_ENABLED is explicitly true/1/yes/on. */
 export function isInstagramPublishingEnabled(value: string | null | undefined): boolean {
+  return isSwitchOn(value);
+}
+
+/** Any publishing switch env value: off unless explicitly true/1/yes/on. */
+export function isSwitchOn(value: string | null | undefined): boolean {
   return /^(true|1|yes|on)$/i.test(String(value ?? '').trim());
 }
 

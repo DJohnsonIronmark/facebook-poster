@@ -23,7 +23,9 @@ export async function sendScheduledPostToWebhook(post: {
 }): Promise<{ ok: boolean; error?: string }> {
   // This webhook publishes to Facebook. Instagram rows must never reach it (kept inline rather
   // than imported so this module stays import-free for the Node test scripts).
-  if (post.platform === 'instagram') return { ok: false, error: 'Instagram posts are never sent to the Facebook publisher' };
+  if (post.platform && post.platform !== 'facebook') {
+    return { ok: false, error: `${post.platform} posts are never sent to the Facebook publisher` };
+  }
   const url = process.env.N8N_WEBHOOK_URL;
   if (!url) return { ok: false, error: 'n8n webhook URL not configured' };
 
