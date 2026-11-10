@@ -34,15 +34,15 @@ export interface SocialMappedPage {
 export interface LinkedInOrg { id: string; name: string; role?: string | null }
 
 export const CONNECT_MESSAGES: Record<string, string> = {
-  denied: 'sign-in was cancelled.',
-  state_mismatch: 'sign-in could not be verified. Please try again.',
-  not_configured: "isn't set up yet (app credentials missing on the server).",
-  forbidden: 'only admins can connect accounts.',
-  no_code: 'sign-in did not finish. Please try again.',
-  exchange_failed: 'sign-in failed while getting access. Please try again.',
-  profile_failed: 'sign-in worked but the account details could not be read. Please try again.',
-  no_admin_orgs: 'this LinkedIn member is not an admin of any company page.',
-  save_failed: 'the connection could not be saved (is SOCIAL_TOKEN_KEY set?).',
+  denied: 'Sign-in was cancelled, so nothing was connected.',
+  state_mismatch: 'Sign-in could not be verified (the link expired or was opened in another tab). Please try again.',
+  not_configured: "Connecting isn't set up yet: the app credentials are missing on the server.",
+  forbidden: 'Only admins can connect accounts.',
+  no_code: 'Sign-in did not finish. Please try again.',
+  exchange_failed: 'Sign-in failed while getting access. Please try again.',
+  profile_failed: 'Signed in, but the account details could not be read. Please try again.',
+  no_admin_orgs: "That LinkedIn account isn't an admin or content admin of any company page.",
+  save_failed: 'The connection could not be saved (check SOCIAL_TOKEN_KEY on the server).',
 };
 
 const NAME = { linkedin: 'LinkedIn', x: 'X' } as const;
@@ -211,7 +211,7 @@ export function LinkedInMappingCell({ page, connections, isAdmin, loadOrgs, onSa
   connections: SocialConnection[];
   isAdmin: boolean;
   /** cached per connection by the parent */
-  loadOrgs: (connectionId: string) => Promise<{ orgs: LinkedInOrg[] } | { error: string }>;
+  loadOrgs: (connectionId: string) => Promise<{ orgs: LinkedInOrg[] } | { error: string; needsReauth?: boolean }>;
   onSaved: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -220,6 +220,7 @@ export function LinkedInMappingCell({ page, connections, isAdmin, loadOrgs, onSa
   const [orgId, setOrgId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [needsReauth, setNeedsReauth] = useState(false);
   const active = connections.filter((c) => c.provider === 'linkedin' && c.status === 'active');
   const current = page.linkedin_org_id ? page.linkedin_org_name || `Organization ${page.linkedin_org_id}` : null;
   const broken = !!page.linkedin_connection_id && page.linkedin_connection_status !== 'active';
@@ -229,11 +230,12 @@ export function LinkedInMappingCell({ page, connections, isAdmin, loadOrgs, onSa
     setOrgs(null);
     setOrgId('');
     setError(null);
+    setNeedsReauth(false);
     if (!id) return;
     setBusy(true);
     const r = await loadOrgs(id);
     setBusy(false);
-    if ('error' in r) setError(r.error);
+    if ('error' in r) { setError(r.error); setNeedsReauth(!!r.needsReauth); }
     else { setOrgs(r.orgs); if (r.orgs.length === 1) setOrgId(r.orgs[0].id); }
   };
 
@@ -262,8 +264,8 @@ export function LinkedInMappingCell({ page, connections, isAdmin, loadOrgs, onSa
     return (
       <div className="flex items-center gap-2 text-xs">
         <span className="font-semibold text-[#0a66c2]">LinkedIn</span>
-        <span className={current ? (broken ? 'text-amber-800' : 'text-gray-800') : 'text-gray-400'}>
-          {current || 'not set'}{broken ? ' (reconnect the account)' : ''}
+        <span className={current ? (broken ? 'text-amber-800 font-medium' : 'text-gray-800') : 'text-gray-400'}>
+          {current || 'not set'}{broken ? ` (${page.linkedin_connection_status === 'needs_reauth' ? 'account needs reconnecting' : 'account disconnected; pick another'})` : ''}
         </span>
         {isAdmin && (
           <button type="button" onClick={startEdit} className="text-blue-600 hover:underline">{current ? 'Change' : 'Set'}</button>
@@ -297,7 +299,15 @@ export function LinkedInMappingCell({ page, connections, isAdmin, loadOrgs, onSa
       )}
       {current && <button type="button" onClick={() => save(true)} disabled={busy} className="px-2 py-1 rounded text-red-700 hover:bg-red-50">Remove</button>}
       <button type="button" onClick={() => setOpen(false)} disabled={busy} className="px-2 py-1 rounded border">Cancel</button>
-      {error && <span className="basis-full text-red-700">{error}</span>}
+      {error && (
+        <span className="basis-full text-red-700">
+          {error}
+          {needsReauth && isAdmin && (
+            <button type="button" onClick={() => { window.location.href = START.linkedin; }}
+              className="ml-2 px-2 py-0.5 rounded bg-amber-600 text-white">Reconnect</button>
+          )}
+        </span>
+      )}
     </div>
   );
 }
@@ -340,7 +350,11 @@ export function XMappingCell({ page, connections, isAdmin, onSaved }: {
       ) : (
         <span className={current ? (broken ? 'text-amber-800' : 'text-gray-800') : 'text-gray-400'}>{current || 'not set'}</span>
       )}
-      {broken && <span className="text-amber-800">reconnect the account</span>}
+      {broken && (
+        <span className="text-amber-800 font-medium">
+          {page.x_connection_status === 'needs_reauth' ? 'account needs reconnecting' : 'account disconnected; pick another'}
+        </span>
+      )}
       {busy && <span className="text-gray-500">Saving…</span>}
       {error && <span className="text-red-700">{error}</span>}
     </div>

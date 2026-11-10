@@ -26,6 +26,8 @@ export interface FacebookPage {
   linkedin_connection_id?: string | null; // connected LinkedIn admin used to post for this page
   x_connection_id?: string | null;        // connected X account (required for X posts)
   x_username?: string | null;
+  linkedin_connection_status?: string | null; // 'active' | 'needs_reauth' | 'disconnected' | 'missing' | null
+  x_connection_status?: string | null;
 }
 
 export interface ScheduledPost {

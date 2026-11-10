@@ -16,7 +16,7 @@ import { uploadMediaFiles } from '@/lib/media/upload';
 // MM/DD/YYYY [h:mm AM|PM] (local) or ISO → ISO; same rules the CSV importer always used
 import { parseScheduledDate } from '@/lib/csv';
 import { evaluateInstagramTarget, parsePlatformsCell, PLATFORM_LABEL, type IgTargetMedia, type Platform } from '@/lib/instagram/rules';
-import { evaluateSocialTarget, pageHasLinkedIn, pageHasX, pageReadyFor, platformCountPhrase, useSocialStatus, type SocialPlatform } from '@/lib/social/ui';
+import { evaluateSocialTarget, pageHasLinkedIn, pageHasX, pageNeedsReconnect, pageReadyFor, platformCountPhrase, useSocialStatus, type SocialPlatform } from '@/lib/social/ui';
 import { analyzeInstagramMedia, releaseIgMedia, type IgMediaInfo } from '@/lib/instagram/browser';
 
 interface PostFormProps {
@@ -244,8 +244,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         text: replacePlaceholders(socialTextFor(platform), pageValues(pg)),
         pageFound: true,
         pageReady: pageReadyFor(platform, pg),
+        needsReconnect: pageNeedsReconnect(platform, pg),
         mediaType: kind,
         mediaName,
+        externalMediaUrl: !!kind && mediaInputMode === 'url',
         fileSize: mediaInputMode === 'file' ? selectedFile?.size ?? null : null,
         hasLink: !kind && !!linkUrl.trim(),
         droppedLink: !kind && !!linkUrl.trim(),
@@ -617,8 +619,10 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         text: sp === 'linkedin' ? liText : xText,
         pageFound: !!page,
         pageReady: pageReadyFor(sp, page),
+        needsReconnect: pageNeedsReconnect(sp, page),
         mediaType: kind,
         mediaName,
+        externalMediaUrl: ms?.state === 'url',
         fileSize: ms?.state === 'file' ? mediaFiles[ms.fileIndex]?.size ?? null : null,
         hasLink: !kind && !!row.link_url.trim(),
         droppedLink: !kind && !!row.link_url.trim(),
@@ -1129,12 +1133,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 </div>
                 {liUnavailable && (
                   <p id="liUnavailableHint" className="mt-1 text-xs text-gray-500">
-                    LinkedIn: none of the selected pages has a LinkedIn company page set yet (Pages tab → LinkedIn column).
+                    LinkedIn: none of the selected pages has a LinkedIn company page set with an active connection (Pages tab).
                   </p>
                 )}
                 {xUnavailable && (
                   <p id="xUnavailableHint" className="mt-1 text-xs text-gray-500">
-                    X: none of the selected pages has an X account set yet (Pages tab → X column).
+                    X: none of the selected pages has an X account set with an active connection (Pages tab).
                   </p>
                 )}
                 {(wantLi || wantX) && (

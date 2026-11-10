@@ -14,7 +14,7 @@ import ClientSettings from './ClientSettings';
 import type { ReviewBatch, ReviewPost } from '@/lib/review/types';
 import { groupPosts } from '@/lib/review/grouping';
 import { validateIgCaption, PLATFORM_LABEL, rowPlatform } from '@/lib/instagram/rules';
-import { countByPlatform, platformCountPhrase, platformPublishingOn, socialTextIssues, useSocialStatus, type SocialStatus } from '@/lib/social/ui';
+import { countByPlatform, platformCountPhrase, platformPublishingOn, socialTextIssues, SOCIAL_STATUS_OFF, type SocialStatus } from '@/lib/social/ui';
 import { downloadCSV, formatScheduledDate, parseCSVObjects, parseScheduledDate, toCSV } from '@/lib/csv';
 import {
   type ComposeEmail, clientReviewEmail, draftsReadyEmail, mailtoUrl, outlookComposeUrl, readyToPostEmail,
@@ -66,7 +66,8 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
   const [banner, setBanner] = useState<{ kind: 'ok' | 'error'; text: string; link?: string; compose?: ComposeEmail } | null>(null);
   const [showClients, setShowClients] = useState(false);
   const [igEnabled, setIgEnabled] = useState(false);
-  const socialStatus = useSocialStatus();
+  // Publishing switches from GET /api/review/batches (publishing_enabled: { instagram, linkedin, x })
+  const [socialStatus, setSocialStatus] = useState<SocialStatus | null>(null);
   const finalInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -77,6 +78,13 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
       if (!res.ok) throw new Error(data.error || 'Failed to load approvals');
       setBatches(data.batches || []);
       setIgEnabled(data.instagram_publishing_enabled === true);
+      const pe = data.publishing_enabled && typeof data.publishing_enabled === 'object' ? data.publishing_enabled : null;
+      setSocialStatus(pe ? {
+        ...SOCIAL_STATUS_OFF,
+        instagram: { enabled: pe.instagram === true },
+        linkedin: { enabled: pe.linkedin === true, configured: false },
+        x: { enabled: pe.x === true, configured: false },
+      } : null);
     } catch (e) {
       setBanner({ kind: 'error', text: e instanceof Error ? e.message : 'Failed to load approvals' });
     } finally {

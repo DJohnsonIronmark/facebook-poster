@@ -83,15 +83,33 @@ export interface SocialPageFields {
   linkedin_connection_id?: string | null;
   x_connection_id?: string | null;
   x_username?: string | null;
+  /** from GET /api/pages: 'active' | 'needs_reauth' | 'disconnected' | 'missing' | null (null = not linked) */
+  linkedin_connection_status?: string | null;
+  x_connection_status?: string | null;
 }
 
+/** Mapped AND its connection is active (anything else is "not ready"). */
 export const pageHasLinkedIn = (p: SocialPageFields | null | undefined): boolean =>
-  !!p?.linkedin_org_id && !!p?.linkedin_connection_id;
+  !!p?.linkedin_org_id && !!p?.linkedin_connection_id && p?.linkedin_connection_status === 'active';
 
-export const pageHasX = (p: SocialPageFields | null | undefined): boolean => !!p?.x_connection_id;
+export const pageHasX = (p: SocialPageFields | null | undefined): boolean =>
+  !!p?.x_connection_id && p?.x_connection_status === 'active';
+
+/** Linked, but the connection needs attention (expired, disconnected or deleted). */
+export function pageNeedsReconnect(platform: SocialPlatform, p: SocialPageFields | null | undefined): boolean {
+  if (!p) return false;
+  const linked = platform === 'linkedin' ? !!p.linkedin_org_id && !!p.linkedin_connection_id : !!p.x_connection_id;
+  const status = platform === 'linkedin' ? p.linkedin_connection_status : p.x_connection_status;
+  return linked && status !== 'active';
+}
 
 export const pageReadyFor = (platform: SocialPlatform, p: SocialPageFields | null | undefined): boolean =>
   platform === 'linkedin' ? pageHasLinkedIn(p) : pageHasX(p);
+
+export const NEEDS_RECONNECT: Record<SocialPlatform, string> = {
+  linkedin: "This page's LinkedIn account needs to be reconnected (Pages tab → Connected accounts)",
+  x: "This page's X account needs to be reconnected (Pages tab → Connected accounts)",
+};
 
 export const MISSING_MAPPING: Record<SocialPlatform, string> = {
   linkedin: 'This page has no LinkedIn company page set (Pages tab → LinkedIn column)',
@@ -101,21 +119,34 @@ export const MISSING_MAPPING: Record<SocialPlatform, string> = {
 // ---------------------------------------------------------------------------------------------
 // Text + media checks
 
+// RegExp() rather than a literal: the 'u' flag literal is rejected under the ES5 TS target
+const UNDERSCORE_TAG_RE = new RegExp('(^|[^\\p{L}\\p{N}_&])#[\\p{L}\\p{N}]*_', 'u');
+
 export function socialTextIssues(platform: SocialPlatform, text: string, opts: { hasMedia: boolean; hasLink: boolean }): TextIssues {
-  return platform === 'x' ? validateXText(text, { hasMedia: opts.hasMedia }) : validateLinkedInText(text, opts);
+  if (platform === 'x') return validateXText(text, { hasMedia: opts.hasMedia });
+  const r = validateLinkedInText(text, opts);
+  // LinkedIn escapes '_' even inside hashtags, so #back_pain only links #back
+  if (UNDERSCORE_TAG_RE.test(String(text ?? ''))) {
+    return { errors: r.errors, warnings: [...r.warnings, "LinkedIn hashtags stop at '_' (#back_pain only links #back); remove the underscore"] };
+  }
+  return r;
 }
 
 export interface SocialTargetInput {
   platform: SocialPlatform;
   text: string;                       // placeholders already filled in
   pageFound: boolean;
-  pageReady: boolean;                 // linkedin org + connection / x connection mapped
+  pageReady: boolean;                 // linkedin org + connection / x connection mapped and active
+  /** linked but the connection is not active */
+  needsReconnect?: boolean;
   mediaType: 'photo' | 'video' | null;
   /** file name or URL, used to judge the file type; null when no media */
   mediaName: string | null;
   fileSize?: number | null;
   /** LinkedIn: link_url present and no media (article post). Ignored for X. */
   hasLink: boolean;
+  /** media is an outside https link (LinkedIn / X need an app upload) */
+  externalMediaUrl?: boolean;
   /** X: the row/form has a link_url that X will not use */
   droppedLink?: boolean;
   direct: boolean;                    // not on the approval workflow → goes straight to /api/posts
@@ -129,7 +160,10 @@ export function evaluateSocialTarget(input: SocialTargetInput): TextIssues {
   const name = PLATFORM_LABEL[input.platform];
   const errors: string[] = [];
   const warnings: string[] = [];
-  if (input.pageFound && !input.pageReady) errors.push(MISSING_MAPPING[input.platform]);
+  if (input.pageFound && !input.pageReady) errors.push(input.needsReconnect ? NEEDS_RECONNECT[input.platform] : MISSING_MAPPING[input.platform]);
+  if (input.mediaType && input.externalMediaUrl) {
+    errors.push(`${name} media must be uploaded with the post (a file, not a media_url link)`);
+  }
   const hasMedia = !!input.mediaType;
   const text = socialTextIssues(input.platform, input.text, { hasMedia, hasLink: input.platform === 'linkedin' && input.hasLink });
   errors.push(...text.errors);

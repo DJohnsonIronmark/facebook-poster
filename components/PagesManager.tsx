@@ -80,13 +80,18 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
     }
   }, []);
 
-  const loadOrgs = useCallback(async (connectionId: string): Promise<{ orgs: LinkedInOrg[] } | { error: string }> => {
+  const loadOrgs = useCallback(async (connectionId: string): Promise<{ orgs: LinkedInOrg[] } | { error: string; needsReauth?: boolean }> => {
     const cached = orgCache.current.get(connectionId);
     if (cached) return { orgs: cached };
     try {
       const res = await fetch(`/api/linkedin/organizations?connection_id=${encodeURIComponent(connectionId)}`, { cache: 'no-store' });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) return { error: typeof data.error === 'string' ? data.error : 'Could not load LinkedIn company pages' };
+      if (res.status === 409 && data.needs_reauth === true) {
+        return { error: typeof data.error === 'string' ? data.error : 'This LinkedIn sign-in has expired.', needsReauth: true };
+      }
+      if (!res.ok) {
+        return { error: res.status === 502 ? 'LinkedIn did not answer. Try again in a minute.' : typeof data.error === 'string' ? data.error : 'Could not load LinkedIn company pages' };
+      }
       const orgs: LinkedInOrg[] = Array.isArray(data.organizations) ? data.organizations : [];
       orgCache.current.set(connectionId, orgs);
       return { orgs };
@@ -127,7 +132,7 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
       const name = provider === 'x' ? 'X' : provider === 'linkedin' ? 'LinkedIn' : 'Account';
       setSocialMessage(connected
         ? { kind: 'ok', text: `${name} connected. Map it to pages with the ${name} control on each page below.` }
-        : { kind: 'error', text: `${name}: ${CONNECT_MESSAGES[connectError || ''] || `sign-in failed (${connectError}). Please try again.`}` });
+        : { kind: 'error', text: `${name}: ${CONNECT_MESSAGES[connectError || ''] || `Sign-in failed (${connectError}). Please try again.`}` });
       ['connected', 'connect_error', 'provider'].forEach((k) => params.delete(k));
       window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`);
     }
