@@ -6,8 +6,12 @@ import DeviceToggle from '@/components/DeviceToggle';
 import InstagramPostPreview from '@/components/InstagramPostPreview';
 import PlatformBadge from '@/components/PlatformBadge';
 import IgCaptionMeter from '@/components/IgCaptionMeter';
+import LinkedInPostPreview from '@/components/LinkedInPostPreview';
+import XPostPreview from '@/components/XPostPreview';
+import SocialTextMeter from '@/components/SocialTextMeter';
 import { groupPosts } from '@/lib/review/grouping';
-import { validateIgCaption } from '@/lib/instagram/rules';
+import { validateIgCaption, PLATFORM_LABEL, rowPlatform } from '@/lib/instagram/rules';
+import { socialTextIssues } from '@/lib/social/ui';
 
 interface ClientPost {
   id: string;
@@ -21,9 +25,21 @@ interface ClientPost {
   scheduled_for: string | null;
   client_comment: string | null;
   link_preview: PreviewLinkCard | null;
-  platform?: 'facebook' | 'instagram' | null;
+  platform?: 'facebook' | 'instagram' | 'linkedin' | 'x' | null;
   post_group_id?: string | null;
   ig_username?: string | null;
+  linkedin_org_name?: string | null;
+  x_username?: string | null;
+}
+
+/** Text over a platform's limit can't be saved or approved (the server rejects it too). */
+function textInvalid(post: ClientPost, text: string): boolean {
+  const platform = rowPlatform(post);
+  if (platform === 'instagram') return validateIgCaption(text).errors.length > 0;
+  if (platform === 'linkedin' || platform === 'x') {
+    return socialTextIssues(platform, text, { hasMedia: !!post.media_type, hasLink: platform === 'linkedin' && !post.media_type && !!post.link_url }).errors.length > 0;
+  }
+  return false;
 }
 
 interface BatchInfo {
@@ -73,8 +89,9 @@ export default function ClientReviewPage({ params }: { params: { token: string }
     [posts, drafts],
   );
   const groups = useMemo(() => groupPosts(posts), [posts]);
-  // Instagram captions over Instagram's limits can't be saved or approved (the server rejects them too)
-  const igInvalid = posts.some((p) => p.platform === 'instagram' && drafts[p.id] && validateIgCaption(drafts[p.id].post_content).errors.length > 0);
+  // Instagram captions, LinkedIn text or X text over the platform's limits can't be saved or approved
+  const invalidPosts = posts.filter((p) => drafts[p.id] && textInvalid(p, drafts[p.id].post_content));
+  const anyInvalid = invalidPosts.length > 0;
 
   const submit = async (action: 'save' | 'approve') => {
     setBusy(action);
@@ -137,7 +154,7 @@ export default function ClientReviewPage({ params }: { params: { token: string }
               {posts.length} post{posts.length === 1 ? '' : 's'} ready for your review
             </p>
             <p className="text-sm">
-              Each preview shows the post exactly as it will look on Facebook or Instagram. Edit the text on the right and the preview updates as you type.
+              Each preview shows the post as it will look on {Array.from(new Set(posts.map((p) => PLATFORM_LABEL[rowPlatform(p)]))).join(', ').replace(/, ([^,]*)$/, ' or $1')}. Edit the text on the right and the preview updates as you type.
               Leave a note if you need something else changed (an image, a link or a date). When everything looks right, approve at the bottom.
             </p>
           </div>
@@ -156,13 +173,17 @@ export default function ClientReviewPage({ params }: { params: { token: string }
               {group.length > 1 && (
                 <h2 className="font-semibold text-gray-900">
                   Post {i + 1} · {group[0].franchise_name}{' '}
-                  <span className="font-normal text-sm text-gray-600">Facebook and Instagram versions. Edit each one separately.</span>
+                  <span className="font-normal text-sm text-gray-600">
+                    {group.map((p) => PLATFORM_LABEL[rowPlatform(p)]).join(', ').replace(/, ([^,]*)$/, ' and $1')} versions. Edit each one separately.
+                  </span>
                 </h2>
               )}
               {group.map((post) => {
             const d = drafts[post.id] || { post_content: post.post_content, client_comment: '' };
             const isChanged = d.post_content !== post.post_content;
-            const isIg = post.platform === 'instagram';
+            const platform = rowPlatform(post);
+            const isIg = platform === 'instagram';
+            const isSocial = platform === 'linkedin' || platform === 'x';
             const Heading = group.length > 1 ? 'h3' : 'h2';
             return (
               <div key={post.id} className="grid gap-5 lg:grid-cols-[minmax(0,520px)_1fr]">
@@ -172,6 +193,25 @@ export default function ClientReviewPage({ params }: { params: { token: string }
                       username={post.ig_username || post.franchise_name}
                       facebookPageId={post.facebook_page_id}
                       caption={d.post_content}
+                      mediaType={post.media_type}
+                      mediaUrl={post.media_url}
+                      device={device}
+                    />
+                  ) : platform === 'linkedin' ? (
+                    <LinkedInPostPreview
+                      orgName={post.linkedin_org_name || post.franchise_name}
+                      content={d.post_content}
+                      linkUrl={post.link_url}
+                      linkPreview={post.link_preview}
+                      mediaType={post.media_type}
+                      mediaUrl={post.media_url}
+                      device={device}
+                    />
+                  ) : platform === 'x' ? (
+                    <XPostPreview
+                      displayName={post.franchise_name}
+                      username={post.x_username}
+                      content={d.post_content}
                       mediaType={post.media_type}
                       mediaUrl={post.media_url}
                       device={device}
@@ -194,7 +234,7 @@ export default function ClientReviewPage({ params }: { params: { token: string }
                   <div className="flex items-center justify-between gap-2">
                     <Heading className="font-semibold text-gray-900 flex items-center gap-2">
                       <PlatformBadge platform={post.platform} />
-                      {group.length > 1 ? `${isIg ? 'Instagram' : 'Facebook'} version` : `Post ${i + 1} · ${post.franchise_name}`}
+                      {group.length > 1 ? `${PLATFORM_LABEL[platform]} version` : `Post ${i + 1} · ${post.franchise_name}`}
                     </Heading>
                     {isChanged && <span className="text-xs font-medium bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">Edited</span>}
                   </div>
@@ -204,17 +244,21 @@ export default function ClientReviewPage({ params }: { params: { token: string }
                     </p>
                   )}
                   <label className="block">
-                    <span className="text-sm font-medium text-gray-700">{isIg ? 'Instagram caption' : 'Post text'}</span>
+                    <span className="text-sm font-medium text-gray-700">{isIg ? 'Instagram caption' : isSocial ? `${PLATFORM_LABEL[platform]} text` : 'Post text'}</span>
                     <textarea
                       value={d.post_content}
                       readOnly={readOnly}
                       onChange={(e) => setDrafts({ ...drafts, [post.id]: { ...d, post_content: e.target.value } })}
                       rows={8}
-                      aria-describedby={isIg ? `igmeter-${post.id}` : undefined}
+                      aria-describedby={isIg || isSocial ? `textmeter-${post.id}` : undefined}
                       className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-[15px] focus:ring-2 focus:ring-blue-500 focus:border-blue-500 read-only:bg-gray-50"
                     />
                   </label>
-                  {isIg && !readOnly && <IgCaptionMeter caption={d.post_content} id={`igmeter-${post.id}`} />}
+                  {isIg && !readOnly && <IgCaptionMeter caption={d.post_content} id={`textmeter-${post.id}`} />}
+                  {isSocial && !readOnly && (
+                    <SocialTextMeter platform={platform} text={d.post_content} id={`textmeter-${post.id}`}
+                      hasMedia={!!post.media_type} hasLink={platform === 'linkedin' && !post.media_type && !!post.link_url} />
+                  )}
                   {isChanged && !readOnly && (
                     <button type="button" className="text-sm text-blue-600 hover:underline"
                       onClick={() => setDrafts({ ...drafts, [post.id]: { ...d, post_content: post.post_content } })}>
@@ -248,13 +292,15 @@ export default function ClientReviewPage({ params }: { params: { token: string }
             {!confirming ? (
               <>
                 <span className="text-sm text-gray-600 mr-auto">
-                  {changed.length > 0 ? `${changed.length} unsaved change${changed.length === 1 ? '' : 's'}` : 'No unsaved changes'}
+                  {anyInvalid
+                    ? <span className="text-red-700">{invalidPosts.length} post{invalidPosts.length === 1 ? ' is' : 's are'} over {invalidPosts.length === 1 ? 'its' : 'their'} platform&apos;s length limit. Shorten {invalidPosts.length === 1 ? 'it' : 'them'} to save or approve.</span>
+                    : changed.length > 0 ? `${changed.length} unsaved change${changed.length === 1 ? '' : 's'}` : 'No unsaved changes'}
                 </span>
-                <button type="button" onClick={() => submit('save')} disabled={busy !== null || changed.length === 0 || igInvalid}
+                <button type="button" onClick={() => submit('save')} disabled={busy !== null || changed.length === 0 || anyInvalid}
                   className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 disabled:opacity-50">
                   {busy === 'save' ? 'Saving…' : 'Save without approving'}
                 </button>
-                <button type="button" onClick={() => setConfirming(true)} disabled={busy !== null || igInvalid}
+                <button type="button" onClick={() => setConfirming(true)} disabled={busy !== null || anyInvalid}
                   className="px-5 py-2 rounded-lg bg-[#1877f2] text-white font-semibold hover:bg-[#166fe5] disabled:opacity-50">
                   Approve {posts.length} post{posts.length === 1 ? '' : 's'}
                 </button>

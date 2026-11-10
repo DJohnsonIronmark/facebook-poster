@@ -4,6 +4,8 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { BATCH_PUBLIC_COLUMNS, POST_REVIEW_COLUMNS } from '@/lib/review/types';
 import { signPostMedia } from '@/lib/media/server';
 import { attachInstagramUsernames, instagramPublishingEnabled } from '@/lib/instagram/server';
+import { attachSocialIdentities } from '@/lib/social/server';
+import { publishingSwitches } from '@/lib/social/switches';
 
 const OPEN_STATUSES = ['internal_review', 'client_review', 'client_approved'];
 
@@ -59,5 +61,6 @@ export async function GET(request: NextRequest) {
   // Private draft media → short-lived signed URLs for previews
   await signPostMedia(supabase, (data || []).flatMap((b: any) => b.posts || []));
   await attachInstagramUsernames(supabase, (data || []).flatMap((b: any) => b.posts || []));
-  return NextResponse.json({ batches: data, instagram_publishing_enabled: instagramPublishingEnabled() });
+  await attachSocialIdentities(supabase, (data || []).flatMap((b: any) => b.posts || []));
+  return NextResponse.json({ batches: data, instagram_publishing_enabled: instagramPublishingEnabled(), publishing_enabled: publishingSwitches() });
 }

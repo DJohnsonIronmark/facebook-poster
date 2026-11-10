@@ -5,12 +5,16 @@ import FacebookPostPreview from './FacebookPostPreview';
 import InstagramPostPreview from './InstagramPostPreview';
 import PlatformBadge from './PlatformBadge';
 import IgCaptionMeter from './IgCaptionMeter';
+import LinkedInPostPreview from './LinkedInPostPreview';
+import XPostPreview from './XPostPreview';
+import SocialTextMeter from './SocialTextMeter';
 import ReplaceMediaButton from './ReplaceMediaButton';
 import DeviceToggle from './DeviceToggle';
 import ClientSettings from './ClientSettings';
 import type { ReviewBatch, ReviewPost } from '@/lib/review/types';
 import { groupPosts } from '@/lib/review/grouping';
-import { validateIgCaption } from '@/lib/instagram/rules';
+import { validateIgCaption, PLATFORM_LABEL, rowPlatform } from '@/lib/instagram/rules';
+import { countByPlatform, platformCountPhrase, platformPublishingOn, socialTextIssues, useSocialStatus, type SocialStatus } from '@/lib/social/ui';
 import { downloadCSV, formatScheduledDate, parseCSVObjects, parseScheduledDate, toCSV } from '@/lib/csv';
 import {
   type ComposeEmail, clientReviewEmail, draftsReadyEmail, mailtoUrl, outlookComposeUrl, readyToPostEmail,
@@ -62,6 +66,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
   const [banner, setBanner] = useState<{ kind: 'ok' | 'error'; text: string; link?: string; compose?: ComposeEmail } | null>(null);
   const [showClients, setShowClients] = useState(false);
   const [igEnabled, setIgEnabled] = useState(false);
+  const socialStatus = useSocialStatus();
   const finalInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -105,11 +110,12 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
 
   // ---------- final-form bulk export / upload across all client-approved batches ----------
   const exportFinal = () => {
-    // Only posts still waiting to be scheduled (a batch can hold Instagram posts after its Facebook posts went out)
+    // Only posts still waiting to be scheduled (a batch can hold posts for a platform whose publishing is off
+    // after its Facebook posts went out). Instagram and X never take link_url.
     const rows = byStage.client_approved.flatMap((b) =>
       (b.posts || []).filter((p) => p.status === 'client_approved').map((p) => [
         p.id, p.platform || 'facebook', b.client?.name || '', p.location_number, p.franchise_name, p.post_content,
-        p.platform === 'instagram' ? '' : p.link_url, p.media_url, formatScheduledDate(p.scheduled_for), p.client_comment,
+        p.platform === 'instagram' || p.platform === 'x' ? '' : p.link_url, p.media_url, formatScheduledDate(p.scheduled_for), p.client_comment,
       ]),
     );
     downloadCSV(`facebook_final_posts_${new Date().toISOString().slice(0, 10)}.csv`, toCSV(FINAL_HEADERS, rows));
@@ -223,6 +229,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
             device={device}
             canEdit={canEdit}
             igEnabled={igEnabled}
+            socialStatus={socialStatus}
             isAccountManager={!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase()}
             canApproveForClient={isAdmin || (!!userEmail && userEmail.toLowerCase() === (batch.client?.account_manager_email || '').toLowerCase())}
             onChanged={load}
@@ -253,6 +260,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
                   kind: data.failures?.length ? 'error' : 'ok',
                   text: `Scheduled ${data.scheduled} post(s) for ${batch.client?.name}.`
                     + `${data.instagram_message ? ` ${data.instagram_message}` : ''}`
+                    + `${typeof data.held_message === 'string' && data.held_message !== data.instagram_message ? ` ${data.held_message}` : ''}`
                     + `${data.failures?.length ? ` Failed: ${data.failures.join('; ')}` : ''}`,
                 });
                 onScheduled();
@@ -274,9 +282,10 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
 // ---------------------------------------------------------------------------------------
 
 function BatchCard({
-  batch, open, onToggle, device, canEdit, igEnabled, canApproveForClient, isAccountManager, onChanged, onAction,
+  batch, open, onToggle, device, canEdit, igEnabled, socialStatus, canApproveForClient, isAccountManager, onChanged, onAction,
 }: {
   batch: ReviewBatch; open: boolean; onToggle: () => void; device: 'desktop' | 'mobile'; canEdit: boolean; igEnabled: boolean;
+  socialStatus: SocialStatus | null;
   canApproveForClient: boolean; isAccountManager: boolean;
   onChanged: () => void; onAction: (action: string) => Promise<void>;
 }) {
@@ -286,10 +295,17 @@ function BatchCard({
   const groups = useMemo(() => groupPosts(posts), [posts]);
   const edited = posts.filter((p) => p.client_edited).length;
   const comments = posts.filter((p) => p.client_comment).length;
-  // Scheduling releases only client_approved posts; Instagram ones wait while Instagram publishing is off
+  // Scheduling releases only client_approved posts; Instagram / LinkedIn / X ones wait while that
+  // platform's publishing switch is off
   const approved = posts.filter((p) => p.status === 'client_approved');
-  const igWaiting = igEnabled ? [] : approved.filter((p) => p.platform === 'instagram');
-  const releasable = approved.filter((p) => igEnabled || p.platform !== 'instagram');
+  const isOn = (p: ReviewPost) => platformPublishingOn(rowPlatform(p), socialStatus, igEnabled);
+  const waiting = approved.filter((p) => !isOn(p));
+  const releasable = approved.filter(isOn);
+  const waitingPhrase = platformCountPhrase(countByPlatform(waiting));
+  const waitingSentence = waiting.length
+    ? `${waitingPhrase} ${waiting.length === 1 ? 'is' : 'are'} waiting for ${waiting.length === 1 ? 'its' : 'their'} publishing to be switched on`
+    : '';
+  const platformCounts = countByPlatform(posts);
   const alreadyScheduled = posts.filter((p) => p.status === 'pending').length;
   const unscheduled = releasable.filter((p) => !p.scheduled_for).length;
   const fmt = (d?: string | null) => (d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '');
@@ -305,7 +321,7 @@ function BatchCard({
     approve_internal: `Email the review link (from the no-reply address, replies to ${batch.client?.account_manager_email || '(no account manager set)'}) to ${batch.client?.client_reviewer_emails?.join(', ') || '(no client emails configured)'}${batch.created_by_email && batch.created_by_email !== batch.client?.account_manager_email ? ` (cc ${batch.created_by_email})` : ''}?`,
     resend_link: 'Send a new link? The previous link will stop working.',
     schedule: `Schedule ${releasable.length} post(s) for ${batch.client?.name}? They will publish at their scheduled times.`
-      + (igWaiting.length ? ` ${igWaiting.length} Instagram post(s) will wait here: Instagram publishing is not enabled yet.` : ''),
+      + (waiting.length ? ` ${waitingSentence}; ${waiting.length === 1 ? 'it stays' : 'they stay'} here.` : ''),
     cancel: alreadyScheduled
       ? `Cancel this batch? Its ${approved.length} unscheduled post(s) will never publish. ${alreadyScheduled} post(s) already scheduled will still publish (delete them from the Scheduled tab).`
       : 'Cancel this batch? Its posts will never publish and the client link stops working.',
@@ -326,14 +342,19 @@ function BatchCard({
             {edited > 0 && <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">{edited} edited by client</span>}
             {comments > 0 && <span className="text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full">{comments} client note{comments === 1 ? '' : 's'}</span>}
             {batch.status === 'client_approved' && unscheduled > 0 && <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full">{unscheduled} missing a schedule date</span>}
-            {posts.some((p) => p.platform === 'instagram') && (
-              <span className="text-xs bg-pink-100 text-pink-800 px-2 py-0.5 rounded-full">
-                {posts.filter((p) => p.platform === 'instagram').length} Instagram
-              </span>
+            {(platformCounts.instagram || 0) > 0 && (
+              <span className="text-xs bg-pink-100 text-pink-800 px-2 py-0.5 rounded-full">{platformCounts.instagram} Instagram</span>
             )}
-            {batch.status === 'client_approved' && igWaiting.length > 0 && (
-              <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full" title="Set INSTAGRAM_PUBLISHING_ENABLED once the n8n Instagram publisher is live">
-                {igWaiting.length} Instagram waiting: publishing not enabled yet
+            {(platformCounts.linkedin || 0) > 0 && (
+              <span className="text-xs bg-[#e8f1fa] text-[#0a66c2] px-2 py-0.5 rounded-full">{platformCounts.linkedin} LinkedIn</span>
+            )}
+            {(platformCounts.x || 0) > 0 && (
+              <span className="text-xs bg-gray-900 text-white px-2 py-0.5 rounded-full">{platformCounts.x} X</span>
+            )}
+            {batch.status === 'client_approved' && waiting.length > 0 && (
+              <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full"
+                title="Each platform has its own publishing switch (INSTAGRAM_ / LINKEDIN_ / X_PUBLISHING_ENABLED); these posts are released when theirs is on">
+                {waitingSentence}
               </span>
             )}
             {batch.status === 'client_approved' && alreadyScheduled > 0 && (
@@ -389,7 +410,7 @@ function BatchCard({
                 )}
                 {batch.status === 'client_approved' && (
                   <button onClick={() => setConfirm('schedule')} disabled={unscheduled > 0 || releasable.length === 0}
-                    title={releasable.length === 0 ? 'Nothing to schedule until Instagram publishing is enabled' : unscheduled > 0 ? 'Every post needs a schedule date first' : undefined}
+                    title={releasable.length === 0 ? `Nothing to schedule until ${Array.from(new Set(waiting.map((p) => PLATFORM_LABEL[rowPlatform(p)]))).join(' / ') || 'a platform'} publishing is switched on` : unscheduled > 0 ? 'Every post needs a schedule date first' : undefined}
                     className="px-3 py-1.5 text-sm rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-300">
                     Schedule {releasable.length} post{releasable.length === 1 ? '' : 's'}
                   </button>
@@ -409,9 +430,10 @@ function BatchCard({
                 editable={canEdit && (batch.status === 'internal_review' || batch.status === 'client_approved') && p.status === batch.status}
                 onChanged={onChanged} />
             ));
-            // Facebook + Instagram versions of one post: side by side, across the full row
+            // The platform versions of one post: side by side, across the full row
             return group.length > 1 ? (
-              <div key={group[0].post_group_id || group[0].id} role="group" aria-label={`${group[0].franchise_name}: Facebook and Instagram versions`}
+              <div key={group[0].post_group_id || group[0].id} role="group"
+                aria-label={`${group[0].franchise_name}: ${group.map((p) => PLATFORM_LABEL[rowPlatform(p)]).join(', ')} versions`}
                 className="grid gap-5 md:grid-cols-2 border border-dashed border-gray-300 rounded-xl p-3" style={{ gridColumn: '1 / -1' }}>
                 {cards}
               </div>
@@ -448,14 +470,23 @@ function PostReviewCard({ post, device, editable, onChanged }: {
     setWhen(toLocalInput(post.scheduled_for));
   }, [post.post_content, post.link_url, post.scheduled_for]);
 
-  const isIg = post.platform === 'instagram';
-  const igBlocked = isIg && validateIgCaption(content).errors.length > 0;
+  const platform = rowPlatform(post);
+  const isIg = platform === 'instagram';
+  const isSocial = platform === 'linkedin' || platform === 'x';
+  // Facebook text posts take a link card and LinkedIn text posts an article card; Instagram and X never take link_url
+  const linkEditable = !post.media_type && (platform === 'facebook' || platform === 'linkedin');
+  const textBlocked = isIg
+    ? validateIgCaption(content).errors.length > 0
+    : isSocial && socialTextIssues(platform, content, { hasMedia: !!post.media_type, hasLink: platform === 'linkedin' && !!link.trim() }).errors.length > 0;
+  const shownContent = editing ? content : post.post_content;
+  const shownLink = editing && linkEditable ? link : post.link_url;
+  const shownPreview = editing && link !== (post.link_url || '') ? null : post.link_preview;
 
   const save = async () => {
     setSaving(true);
     setError(null);
     const body: Record<string, unknown> = { post_content: content, scheduled_for: when ? new Date(when).toISOString() : null };
-    if (!post.media_type && !isIg) body.link_url = link;
+    if (linkEditable) body.link_url = link;
     const res = await fetch(`/api/review/posts/${post.id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
@@ -478,7 +509,26 @@ function PostReviewCard({ post, device, editable, onChanged }: {
         <InstagramPostPreview
           username={post.ig_username || post.franchise_name}
           facebookPageId={post.facebook_page_id}
-          caption={editing ? content : post.post_content}
+          caption={shownContent}
+          mediaType={post.media_type}
+          mediaUrl={post.media_url}
+          device={device}
+        />
+      ) : platform === 'linkedin' ? (
+        <LinkedInPostPreview
+          orgName={post.linkedin_org_name || post.franchise_name}
+          content={shownContent}
+          linkUrl={shownLink}
+          linkPreview={shownPreview}
+          mediaType={post.media_type}
+          mediaUrl={post.media_url}
+          device={device}
+        />
+      ) : platform === 'x' ? (
+        <XPostPreview
+          displayName={post.franchise_name}
+          username={post.x_username}
+          content={shownContent}
           mediaType={post.media_type}
           mediaUrl={post.media_url}
           device={device}
@@ -487,9 +537,9 @@ function PostReviewCard({ post, device, editable, onChanged }: {
         <FacebookPostPreview
           pageName={post.franchise_name}
           facebookPageId={post.facebook_page_id}
-          content={editing ? content : post.post_content}
-          linkUrl={editing && !post.media_type ? link : post.link_url}
-          linkPreview={editing && link !== (post.link_url || '') ? null : post.link_preview}
+          content={shownContent}
+          linkUrl={shownLink}
+          linkPreview={shownPreview}
           mediaType={post.media_type}
           mediaUrl={post.media_url}
           scheduledFor={editing ? (when ? new Date(when).toISOString() : null) : post.scheduled_for}
@@ -502,6 +552,9 @@ function PostReviewCard({ post, device, editable, onChanged }: {
           <PlatformBadge platform={post.platform} />
           <span className="font-medium text-gray-800">{post.location_number ? `${post.location_number} · ` : ''}{post.franchise_name}</span>
           {post.status === 'pending' && <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full">Scheduled</span>}
+          {post.status === 'publishing' && <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">Publishing…</span>}
+          {post.status === 'published' && <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full">Published</span>}
+          {post.status === 'failed' && <span className="text-xs bg-red-100 text-red-800 px-2 py-0.5 rounded-full">Failed</span>}
           {post.client_edited && (
             <button onClick={() => setShowOriginal(!showOriginal)} className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full hover:bg-amber-200">
               Edited by client {showOriginal ? '▲' : '▼'}
@@ -516,6 +569,11 @@ function PostReviewCard({ post, device, editable, onChanged }: {
             <p className="whitespace-pre-wrap text-gray-600">{post.original_content}</p>
           </div>
         )}
+        {post.status === 'failed' && post.publish_error && (
+          <div className="bg-red-50 border border-red-200 rounded p-2 text-red-800">
+            <span className="font-medium">Publishing failed:</span> {post.publish_error}
+          </div>
+        )}
         {post.client_comment && (
           <div className="bg-purple-50 border border-purple-100 rounded p-2 text-purple-900">
             <span className="font-medium">Client note:</span> {post.client_comment}
@@ -525,11 +583,15 @@ function PostReviewCard({ post, device, editable, onChanged }: {
         {editing ? (
           <div className="space-y-2">
             <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={6}
-              aria-label={`${isIg ? 'Instagram caption' : 'Facebook post text'} for ${post.franchise_name}`}
-              aria-describedby={isIg ? `igmeter-${post.id}` : undefined}
+              aria-label={`${isIg ? 'Instagram caption' : `${PLATFORM_LABEL[platform]} post text`} for ${post.franchise_name}`}
+              aria-describedby={isIg || isSocial ? `textmeter-${post.id}` : undefined}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500" />
-            {isIg && <IgCaptionMeter caption={content} id={`igmeter-${post.id}`} />}
-            {!post.media_type && !isIg && (
+            {isIg && <IgCaptionMeter caption={content} id={`textmeter-${post.id}`} />}
+            {isSocial && (
+              <SocialTextMeter platform={platform} text={content} id={`textmeter-${post.id}`}
+                hasMedia={!!post.media_type} hasLink={platform === 'linkedin' && !!link.trim()} />
+            )}
+            {linkEditable && (
               <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="Link URL (optional)"
                 className="w-full border border-gray-300 rounded-lg px-3 py-1.5" />
             )}
@@ -541,7 +603,7 @@ function PostReviewCard({ post, device, editable, onChanged }: {
             <div className="flex gap-2 justify-end">
               <button onClick={() => { setEditing(false); setContent(post.post_content); setLink(post.link_url || ''); setWhen(toLocalInput(post.scheduled_for)); }}
                 className="px-3 py-1.5 rounded-lg border">Cancel</button>
-              <button onClick={save} disabled={saving || !content.trim() || igBlocked} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+              <button onClick={save} disabled={saving || (!content.trim() && !isSocial) || textBlocked} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
                 {saving ? 'Saving…' : 'Save'}
               </button>
             </div>

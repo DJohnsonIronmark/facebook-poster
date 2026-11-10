@@ -1,6 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAuth } from '@/context/AuthContext';
+import { fetchSocialStatus, type SocialStatus } from '@/lib/social/ui';
+import {
+  CONNECT_MESSAGES, LinkedInMappingCell, SocialAccountsPanel, XMappingCell, type LinkedInOrg, type SocialConnection,
+} from './SocialAccounts';
 
 interface PageRow {
   id: string;
@@ -13,6 +18,13 @@ interface PageRow {
   client_id: string | null;
   ig_user_id?: string | null;
   ig_username?: string | null;
+  linkedin_org_id?: string | null;
+  linkedin_org_name?: string | null;
+  linkedin_connection_id?: string | null;
+  x_connection_id?: string | null;
+  x_username?: string | null;
+  linkedin_connection_status?: string | null;
+  x_connection_status?: string | null;
 }
 interface ClientOpt { id: string; name: string }
 interface FbPage { id: string; name: string; picture: string | null; location: string | null; already_added: boolean }
@@ -43,6 +55,45 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   const [fbLoading, setFbLoading] = useState(false);
   const [filter, setFilter] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  // LinkedIn / X
+  const { role } = useAuth();
+  const isAdmin = role === 'admin';
+  const [socialStatus, setSocialStatus] = useState<SocialStatus | null>(null);
+  const [connections, setConnections] = useState<SocialConnection[]>([]);
+  const [connectionsLoading, setConnectionsLoading] = useState(true);
+  const [socialMessage, setSocialMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const orgCache = useRef(new Map<string, LinkedInOrg[]>());
+
+  const loadSocial = useCallback(async () => {
+    setConnectionsLoading(true);
+    try {
+      const [status, res] = await Promise.all([fetchSocialStatus(), fetch('/api/social/connections', { cache: 'no-store' })]);
+      setSocialStatus(status);
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setConnections(Array.isArray(data.connections) ? data.connections : []);
+      }
+    } catch {
+      // panel shows "no accounts"; the page list still works
+    } finally {
+      setConnectionsLoading(false);
+    }
+  }, []);
+
+  const loadOrgs = useCallback(async (connectionId: string): Promise<{ orgs: LinkedInOrg[] } | { error: string }> => {
+    const cached = orgCache.current.get(connectionId);
+    if (cached) return { orgs: cached };
+    try {
+      const res = await fetch(`/api/linkedin/organizations?connection_id=${encodeURIComponent(connectionId)}`, { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { error: typeof data.error === 'string' ? data.error : 'Could not load LinkedIn company pages' };
+      const orgs: LinkedInOrg[] = Array.isArray(data.organizations) ? data.organizations : [];
+      orgCache.current.set(connectionId, orgs);
+      return { orgs };
+    } catch {
+      return { error: 'Could not load LinkedIn company pages' };
+    }
+  }, []);
 
   const load = useCallback(async () => {
     const [p, c] = await Promise.all([fetch('/api/pages', { cache: 'no-store' }), fetch('/api/clients', { cache: 'no-store' })]);
@@ -66,7 +117,20 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   // Coming back from Facebook Login: /?tab=pages&fb=<flag>
   useEffect(() => {
     load();
+    loadSocial();
     const params = new URLSearchParams(window.location.search);
+    // Coming back from LinkedIn / X sign-in: ?connected=linkedin|x or ?connect_error=<code>&provider=linkedin|x
+    const connected = params.get('connected');
+    const connectError = params.get('connect_error');
+    if (connected || connectError) {
+      const provider = connected || params.get('provider');
+      const name = provider === 'x' ? 'X' : provider === 'linkedin' ? 'LinkedIn' : 'Account';
+      setSocialMessage(connected
+        ? { kind: 'ok', text: `${name} connected. Map it to pages with the ${name} control on each page below.` }
+        : { kind: 'error', text: `${name}: ${CONNECT_MESSAGES[connectError || ''] || `sign-in failed (${connectError}). Please try again.`}` });
+      ['connected', 'connect_error', 'provider'].forEach((k) => params.delete(k));
+      window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`);
+    }
     const flag = params.get('fb');
     if (flag) {
       setMessage(FB_FLAG_MESSAGES[flag] || null);
@@ -74,7 +138,7 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
       window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`);
       if (flag === 'connected') loadFacebookPages();
     }
-  }, [load, loadFacebookPages]);
+  }, [load, loadSocial, loadFacebookPages]);
 
   const clientName = useMemo(() => new Map(clients.map((c) => [c.id, c.name])), [clients]);
   const visible = pages.filter((p) => {
@@ -121,8 +185,19 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
 
   const importable = fbPages.filter((p) => !p.already_added);
 
+  const afterMappingSaved = async () => { await load(); onPagesChanged(); };
+
   return (
     <div className="space-y-4">
+      {socialMessage && (
+        <div className={`text-sm rounded-lg px-4 py-3 border ${socialMessage.kind === 'ok' ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-700'}`} role="status">
+          {socialMessage.text}
+          <button type="button" onClick={() => setSocialMessage(null)} className="ml-3 underline">Dismiss</button>
+        </div>
+      )}
+      <SocialAccountsPanel status={socialStatus} connections={connections} isAdmin={isAdmin} loading={connectionsLoading}
+        onChanged={() => { orgCache.current.clear(); void loadSocial(); void afterMappingSaved(); }} />
+
       <div className="bg-white rounded-lg shadow p-4 space-y-4">
         <div className="flex flex-wrap items-center gap-3">
           <div className="mr-auto">
@@ -247,6 +322,10 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
                 </div>
                 <div className="text-xs text-gray-500">
                   Page ID {p.facebook_page_id}{p.city ? ` · ${p.city}` : ''}{p.client_id ? ` · ${clientName.get(p.client_id) || 'client'}` : ''}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1">
+                  <LinkedInMappingCell page={p} connections={connections} isAdmin={isAdmin} loadOrgs={loadOrgs} onSaved={afterMappingSaved} />
+                  <XMappingCell page={p} connections={connections} isAdmin={isAdmin} onSaved={afterMappingSaved} />
                 </div>
               </div>
               <button onClick={() => setEditingId(p.id)} className="px-3 py-1 rounded-lg bg-gray-100 text-gray-800 hover:bg-gray-200">Edit</button>

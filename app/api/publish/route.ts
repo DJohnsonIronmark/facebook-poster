@@ -34,7 +34,14 @@ export async function POST(request: NextRequest) {
         { status: 409 }
       );
     }
-    // This webhook publishes to Facebook; Instagram rows are left to the n8n Instagram publisher
+    // This webhook publishes to Facebook; Instagram rows are left to the n8n Instagram publisher and
+    // LinkedIn / X rows to the app's social runner (/api/publish/social-run)
+    if (post.platform === 'linkedin' || post.platform === 'x') {
+      return NextResponse.json(
+        { error: `${post.platform === 'x' ? 'X' : 'LinkedIn'} posts can't be published immediately; schedule them instead (they publish at their scheduled time).` },
+        { status: 400 }
+      );
+    }
     if (!mayUseFacebookWebhook(post)) {
       return NextResponse.json({ error: 'Instagram posts cannot be published from here; they publish at their scheduled time.' }, { status: 409 });
     }

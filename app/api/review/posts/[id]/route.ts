@@ -5,6 +5,7 @@ import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { MAX_POST_LENGTH, POST_REVIEW_COLUMNS } from '@/lib/review/types';
 import { normalizeIncomingMediaUrl, signPostMedia } from '@/lib/media/server';
 import { attachInstagramUsernames, instagramCaptionProblem, instagramMediaProblem } from '@/lib/instagram/server';
+import { attachSocialIdentities, isSocialPlatform, socialMediaUrlProblem, socialTextProblem } from '@/lib/social/server';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Internal team can edit while drafts are with them, or after the client approves (final form).
@@ -32,14 +33,18 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   const body = await request.json().catch(() => ({}));
   const patch: Record<string, unknown> = {};
   const isIg = post.platform === 'instagram';
+  const social = isSocialPlatform(post.platform) ? post.platform : null;
   if (typeof body.post_content === 'string') {
     const c = body.post_content.trim();
     if (!c || c.length > MAX_POST_LENGTH) return NextResponse.json({ error: 'Post content is empty or too long' }, { status: 400 });
     const igProblem = isIg ? instagramCaptionProblem(c) : null;
     if (igProblem) return NextResponse.json({ error: igProblem }, { status: 400 });
+    const socialProblem = social ? socialTextProblem(social, c, { hasMedia: !!post.media_type, hasLink: !!post.link_url }) : null;
+    if (socialProblem) return NextResponse.json({ error: socialProblem }, { status: 400 });
     patch.post_content = c;
   }
-  if (typeof body.link_url === 'string' && !post.media_type && !isIg) {
+  // X keeps links in the text itself (no link card), so X rows never take link_url
+  if (typeof body.link_url === 'string' && !post.media_type && !isIg && social !== 'x') {
     patch.link_url = body.link_url.trim() || null;
     patch.link_preview = await fetchLinkPreview(patch.link_url as string | null);
   }
@@ -50,6 +55,8 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     if (!media.ok) return NextResponse.json({ error: 'Invalid media URL' }, { status: 400 });
     const igProblem = isIg && media.value !== post.media_url ? instagramMediaProblem(post.media_type, media.value) : null;
     if (igProblem) return NextResponse.json({ error: igProblem }, { status: 400 });
+    const socialMedia = social && media.value !== post.media_url ? socialMediaUrlProblem(social, post.media_type, media.value) : null;
+    if (socialMedia) return NextResponse.json({ error: socialMedia }, { status: 400 });
     if (media.value !== post.media_url) patch.media_url = media.value;
   }
   if (body.scheduled_for !== undefined) {
@@ -75,6 +82,7 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   }
   await signPostMedia(supabase, [data]);
   await attachInstagramUsernames(supabase, [data]);
+  await attachSocialIdentities(supabase, [data]);
   return NextResponse.json({ post: data });
 }
 

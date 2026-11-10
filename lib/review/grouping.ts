@@ -1,4 +1,4 @@
-// Pure helper: groups the Facebook and Instagram versions of one post (shared post_group_id) so
+// Pure helper: groups the Facebook, Instagram, LinkedIn and X versions of one post (shared post_group_id) so
 // review UIs can show them side by side. No imports (runs under plain Node tests).
 
 export interface Groupable {
@@ -7,11 +7,12 @@ export interface Groupable {
   platform?: string | null;
 }
 
-const platformOrder = (p: Groupable) => (p.platform === 'instagram' ? 1 : 0);
+const ORDER: Record<string, number> = { facebook: 0, instagram: 1, linkedin: 2, x: 3 };
+const platformOrder = (p: Groupable) => ORDER[p.platform || 'facebook'] ?? 0;
 
 /**
  * Returns groups in the order their first post appears. Posts without a post_group_id are their
- * own group. Within a group Facebook comes first, then Instagram.
+ * own group. Within a group: Facebook, Instagram, LinkedIn, X.
  */
 export function groupPosts<T extends Groupable>(posts: T[]): T[][] {
   const groups: T[][] = [];

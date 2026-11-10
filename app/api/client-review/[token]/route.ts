@@ -5,12 +5,13 @@ import { appBaseUrl, notifyReadyToPost } from '@/lib/review/notify';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
 import { signPostMedia } from '@/lib/media/server';
 import { attachInstagramUsernames, instagramCaptionProblem } from '@/lib/instagram/server';
+import { attachSocialIdentities, isSocialPlatform, socialTextProblem } from '@/lib/social/server';
 
 // PUBLIC (no login): the magic-link token is the credential. Everything is scoped to the
 // single batch whose token hash matches; only post text and a comment can be changed.
 
 const CLIENT_POST_COLUMNS =
-  'id, facebook_page_id, franchise_name, location_number, post_content, link_url, media_url, media_type, scheduled_for, status, client_comment, link_preview, platform, post_group_id';
+  'id, facebook_page_id, franchise_name, location_number, post_content, link_url, media_url, media_type, scheduled_for, status, client_comment, link_preview, platform, post_group_id, platform_post_id, publish_error';
 
 async function resolveBatch(token: string) {
   if (!isWellFormedToken(token)) return { supabase: null, batch: null };
@@ -35,6 +36,7 @@ export async function GET(_request: NextRequest, { params }: { params: { token: 
   // Draft media is private; the token-gated page gets short-lived signed URLs (never the bucket path)
   await signPostMedia(supabase, batch.posts || []);
   await attachInstagramUsernames(supabase, batch.posts || []);
+  await attachSocialIdentities(supabase, batch.posts || []);
   for (const p of batch.posts || []) delete p.media_storage_ref;
   batch.posts?.sort((a: any, b: any) =>
     (a.scheduled_for || '').localeCompare(b.scheduled_for || '') || a.franchise_name.localeCompare(b.franchise_name));
@@ -84,6 +86,12 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
       if (content.length > MAX_POST_LENGTH) return NextResponse.json({ error: 'A post is too long.' }, { status: 400 });
       const igProblem = post.platform === 'instagram' ? instagramCaptionProblem(content) : null;
       if (igProblem) return NextResponse.json({ error: `Instagram post for ${post.franchise_name}: ${igProblem}` }, { status: 400 });
+      const socialProblem = isSocialPlatform(post.platform)
+        ? socialTextProblem(post.platform, content, { hasMedia: !!post.media_type, hasLink: !!post.link_url })
+        : null;
+      if (socialProblem) {
+        return NextResponse.json({ error: `${post.platform === 'x' ? 'X' : 'LinkedIn'} post for ${post.franchise_name}: ${socialProblem}` }, { status: 400 });
+      }
       if (content !== post.post_content) patch.post_content = content;
     }
     if (typeof edit.client_comment === 'string') {

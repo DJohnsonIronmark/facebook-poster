@@ -21,6 +21,11 @@ export interface FacebookPage {
   client_id?: string | null;
   ig_user_id?: string | null;   // linked Instagram business account (required for Instagram posts)
   ig_username?: string | null;
+  linkedin_org_id?: string | null;        // LinkedIn company page (required for LinkedIn posts)
+  linkedin_org_name?: string | null;
+  linkedin_connection_id?: string | null; // connected LinkedIn admin used to post for this page
+  x_connection_id?: string | null;        // connected X account (required for X posts)
+  x_username?: string | null;
 }
 
 export interface ScheduledPost {
@@ -31,12 +36,16 @@ export interface ScheduledPost {
   post_content: string;
   link_url: string;
   scheduled_for: string | null;
-  status: 'pending' | 'published' | 'failed' | 'internal_review' | 'client_review' | 'client_approved';
+  status: 'pending' | 'publishing' | 'published' | 'failed' | 'internal_review' | 'client_review' | 'client_approved';
   created_at: string;
   published_at: string | null;
   facebook_post_id: string | null;
-  platform?: 'facebook' | 'instagram' | null;
+  platform?: 'facebook' | 'instagram' | 'linkedin' | 'x' | null;
   post_group_id?: string | null;
+  platform_post_id?: string | null;   // LinkedIn post URN / X post id once published
+  publish_error?: string | null;      // last LinkedIn / X publishing failure
+  linkedin_org_name?: string | null;
+  x_username?: string | null;
 }
 
 export default function Home() {
@@ -107,7 +116,10 @@ export default function Home() {
     ));
   };
 
-  const pendingPosts = posts.filter(p => p.status === 'pending');
+  // Scheduled tab: waiting posts, LinkedIn/X posts the runner is posting right now, and LinkedIn/X
+  // posts whose publishing failed (their error is shown; Facebook failures are handled in n8n)
+  const pendingPosts = posts.filter(p => p.status === 'pending' || p.status === 'publishing'
+    || (p.status === 'failed' && (p.platform === 'linkedin' || p.platform === 'x')));
   const publishedPosts = posts.filter(p => p.status === 'published');
   // Apply filters to published posts
   const filteredPublishedPosts = useMemo(() => {

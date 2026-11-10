@@ -5,8 +5,13 @@ import { generateReviewToken } from '@/lib/review/tokens';
 import { allowedSenderDomain, appBaseUrl, isAllowedSender, notifyClientReview } from '@/lib/review/notify';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
 import { isScheduledForToday, sendScheduledPostToWebhook } from '@/lib/publisher';
-import { planScheduleRelease, shouldSendSameDay } from '@/lib/instagram/release';
-import { instagramCaptionProblem, instagramMediaProblem, instagramPublishingEnabled } from '@/lib/instagram/server';
+import { planScheduleRelease, platformEnabled, platformOf, shouldSendSameDay } from '@/lib/instagram/release';
+import { instagramCaptionProblem, instagramMediaProblem } from '@/lib/instagram/server';
+import { publishingSwitches } from '@/lib/social/switches';
+import {
+  isSocialPlatform, loadConnectionsLite, loadPageMappings, pageSocialProblem, pickMappingFor, socialMediaUrlProblem,
+  socialPublishConstraints, socialTextProblem,
+} from '@/lib/social/server';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
 import { UUID_RE } from '@/lib/review/guards';
 import { createMediaPublisher, instagramPublishConstraints, normalizeIncomingMediaUrl } from '@/lib/media/server';
@@ -23,7 +28,8 @@ const isHttpUrl = (s: string) => { try { return /^https?:$/.test(new URL(s).prot
  *   { action: 'approve_internal' }   internal review done → client_review + email client magic link
  *   { action: 'resend_link' }        new client link (old one stops working) + email
  *   { action: 'final_upload', rows } bulk-apply final copy/schedule to client-approved posts
- *   { action: 'schedule' }           client_approved → pending (n8n publishes); same-day via webhook
+ *   { action: 'schedule' }           client_approved → pending (n8n publishes FB/IG; the social runner
+ *                                    publishes LinkedIn/X); same-day Facebook via webhook
  *   { action: 'cancel' }             stop the batch; posts never publish
  *
  * Every transition is claimed with a status-conditional UPDATE so double-clicks or two
@@ -132,13 +138,19 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
 
         const patch: Record<string, unknown> = {};
         const isIg = post.platform === 'instagram';
+        const social = isSocialPlatform(post.platform) ? post.platform : null;
         if (typeof row.post_content === 'string' && row.post_content.trim()) {
           if (row.post_content.length > MAX_POST_LENGTH) { problems.push(`Row ${i + 1}: content too long`); continue; }
           const igProblem = isIg ? instagramCaptionProblem(row.post_content.trim()) : null;
           if (igProblem) { problems.push(`Row ${i + 1}: ${igProblem}`); continue; }
+          const socialProblem = social
+            ? socialTextProblem(social, row.post_content.trim(), { hasMedia: !!post.media_type, hasLink: !!post.link_url })
+            : null;
+          if (socialProblem) { problems.push(`Row ${i + 1}: ${socialProblem}`); continue; }
           if (row.post_content.trim() !== post.post_content) patch.post_content = row.post_content.trim();
         }
-        if (typeof row.link_url === 'string' && !post.media_type) {
+        // Instagram has no link cards and X keeps links in the text, so neither takes link_url
+        if (typeof row.link_url === 'string' && !post.media_type && !isIg && social !== 'x') {
           const link = row.link_url.trim() || null;
           if (link && !isHttpUrl(link)) { problems.push(`Row ${i + 1}: link_url must be http(s)`); continue; }
           if (link !== post.link_url) {
@@ -154,6 +166,8 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
           if (media.value && media.value !== post.media_url) {
             const igProblem = isIg ? instagramMediaProblem(post.media_type, media.value) : null;
             if (igProblem) { problems.push(`Row ${i + 1}: ${igProblem}`); continue; }
+            const socialMedia = social ? socialMediaUrlProblem(social, post.media_type, media.value) : null;
+            if (socialMedia) { problems.push(`Row ${i + 1}: ${socialMedia}`); continue; }
             patch.media_url = media.value;
           }
         }
@@ -185,17 +199,43 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       if (batch.status !== 'client_approved') return err('Only client-approved batches can be scheduled', 409);
       if (posts.length === 0) return err('Batch has no posts');
 
-      // HARD SAFETY RULE (lib/instagram/release.ts): with Instagram publishing off, Instagram rows
-      // stay client_approved and the batch stays in "Ready to post"; only Facebook rows are released.
-      const igEnabled = instagramPublishingEnabled();
-      const plan = planScheduleRelease(posts, igEnabled);
+      // HARD SAFETY RULE (lib/instagram/release.ts): rows whose platform switch is off (Instagram,
+      // LinkedIn, X) stay client_approved and the batch stays in "Ready to post"; only the rest are released.
+      const switches = publishingSwitches();
+      const plan = planScheduleRelease(posts, switches);
       const igHeldMessage = plan.heldInstagram.length > 0
         ? `${plan.heldInstagram.length} Instagram post(s) not scheduled: Instagram publishing not enabled yet. They stay in Ready to post.`
         : null;
+      const heldLabel: Record<string, string> = { instagram: 'Instagram', linkedin: 'LinkedIn', x: 'X' };
+      const heldByPlatform = new Map<string, number>();
+      for (const p of posts) {
+        if (plan.held.includes(p.id)) heldByPlatform.set(platformOf(p), (heldByPlatform.get(platformOf(p)) || 0) + 1);
+      }
+      const heldMessage = plan.held.length > 0
+        ? `${Array.from(heldByPlatform.entries()).map(([pl, n]) => `${n} ${heldLabel[pl] || pl}`).join(', ')} post(s) not scheduled: publishing for that platform is not enabled yet. They stay in Ready to post.`
+        : null;
       if (plan.release.length === 0) {
-        return err(igHeldMessage || 'No approved posts left to schedule', 409);
+        return err(heldMessage || 'No approved posts left to schedule', 409);
       }
       const toRelease = posts.filter((p) => plan.release.includes(p.id));
+
+      // LinkedIn / X rows need their page mapping + an active connected account before release
+      const socialRows = toRelease.filter((p) => isSocialPlatform(p.platform));
+      if (socialRows.length > 0) {
+        const mappings = await loadPageMappings(supabase, socialRows.map((p) => String(p.facebook_page_id)));
+        const all = Array.from(mappings.values()).flat();
+        const conns = await loadConnectionsLite(supabase, all.flatMap((m) => [m.linkedin_connection_id, m.x_connection_id]));
+        const setupProblems: string[] = [];
+        for (const p of socialRows) {
+          const platform = p.platform === 'x' ? 'x' : 'linkedin';
+          const page = pickMappingFor(platform, mappings.get(String(p.facebook_page_id)));
+          const problem = page ? pageSocialProblem(platform, page, conns) : 'page not found';
+          if (problem) setupProblems.push(`${p.franchise_name} (${platform === 'x' ? 'X' : 'LinkedIn'}): ${problem}`);
+        }
+        if (setupProblems.length > 0) {
+          return err(`Nothing was scheduled: ${setupProblems.length} LinkedIn/X post(s) can't publish yet (${setupProblems.slice(0, 5).join('; ')}${setupProblems.length > 5 ? '…' : ''}). Fix the page setup or remove those posts, then schedule again.`, 409);
+        }
+      }
 
       const minMs = Date.now() + 10 * 60 * 1000; // Facebook needs scheduled times ≥10 min out
       const missing = toRelease.filter((p) => !p.scheduled_for || new Date(p.scheduled_for).getTime() < minMs);
@@ -203,7 +243,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         return err(`${missing.length} post(s) need a future schedule time (at least 10 minutes out): ${missing.map((p) => p.franchise_name).slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`);
       }
 
-      // Private draft media must be public before n8n/Facebook can fetch it. Copy everything
+      // Private draft media must be public before n8n/Facebook (or the LinkedIn/X runner) can fetch it. Copy everything
       // first (idempotent, one copy per file) and stop before claiming if any file fails, so
       // the batch stays client_approved and can be fixed (replace/remove the post) and retried.
       const publishMedia = createMediaPublisher(supabase);
@@ -212,9 +252,12 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       const mediaFailures: string[] = [];
       for (const p of mediaPosts) {
         const isIg = p.platform === 'instagram';
-        const res = await publishMedia(p.media_url, p.media_type, isIg ? instagramPublishConstraints(p.media_type) : {});
+        const social = isSocialPlatform(p.platform) ? p.platform : null;
+        const constraints = isIg ? instagramPublishConstraints(p.media_type) : social ? socialPublishConstraints(social, p.media_type) : {};
+        const res = await publishMedia(p.media_url, p.media_type, constraints);
+        const tag = isIg ? ' (Instagram)' : social === 'linkedin' ? ' (LinkedIn)' : social === 'x' ? ' (X)' : '';
         if (res.ok && res.url) publicUrlById.set(p.id, res.url);
-        else mediaFailures.push(`${p.franchise_name}${isIg ? ' (Instagram)' : ''}: ${res.ok ? 'no media' : res.error}`);
+        else mediaFailures.push(`${p.franchise_name}${tag}: ${res.ok ? 'no media' : res.error}`);
       }
       if (mediaFailures.length > 0) {
         return err(`Nothing was scheduled: media for ${mediaFailures.length} post(s) could not be published (${mediaFailures.slice(0, 5).join('; ')}${mediaFailures.length > 5 ? '…' : ''}). Replace the media or remove those posts, then schedule again.`, 502);
@@ -242,7 +285,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         }
       }
 
-      // Release ONLY the planned rows (never batch-wide: held Instagram rows must stay out of 'pending')
+      // Release ONLY the planned rows (never batch-wide: held rows must stay out of 'pending')
       const releaseIds = plan.release.filter((id) => !heldBack.includes(id));
       let releasedRows: any[] = [];
       if (releaseIds.length > 0) {
@@ -262,16 +305,17 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
 
       // Guards before anything can reach n8n:
       //  * media swapped to a new private file mid-schedule must never be 'pending'
-      //  * an Instagram row must never be 'pending' while Instagram publishing is off
+      //  * an Instagram / LinkedIn / X row must never be 'pending' while that platform's switch is off
       const released: any[] = [];
       for (const post of releasedRows) {
-        const igBlocked = post.platform === 'instagram' && !igEnabled;
-        if (!isStorageRef(post.media_url) && !igBlocked) { released.push(post); continue; }
+        const blocked = !platformEnabled(platformOf(post), switches);
+        if (!isStorageRef(post.media_url) && !blocked) { released.push(post); continue; }
         await supabase.from('facebook_scheduled_posts').update({ status: 'client_approved' }).eq('id', post.id).eq('status', 'pending');
-        failures.push(`${post.franchise_name}: ${igBlocked ? 'Instagram publishing not enabled' : 'media changed while scheduling'}; post not released`);
+        const why = blocked ? `${heldLabel[platformOf(post)] || 'Platform'} publishing not enabled` : 'media changed while scheduling';
+        failures.push(`${post.franchise_name}: ${why}; post not released`);
       }
 
-      // Same-day posts go to the Facebook webhook: Facebook rows only, never Instagram
+      // Same-day posts go to the Facebook webhook: Facebook rows only, never Instagram / LinkedIn / X
       let webhookFailed = 0;
       for (const post of released) {
         if (!shouldSendSameDay(post, isScheduledForToday(post.scheduled_for))) continue; // n8n daily publisher handles the rest
@@ -300,6 +344,8 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         scheduled: released.length - webhookFailed,
         instagram_held: plan.heldInstagram.length,
         instagram_message: igHeldMessage,
+        held: plan.held.length,
+        held_message: heldMessage,
         batch_status: batchStatus,
         failures,
       });

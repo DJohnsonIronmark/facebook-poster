@@ -9,6 +9,7 @@ import { MAX_POST_LENGTH } from '@/lib/review/types';
 import { normalizeIncomingMediaUrl } from '@/lib/media/server';
 import { normalizePlatform, type Platform } from '@/lib/instagram/rules';
 import { instagramRowProblem } from '@/lib/instagram/server';
+import { isSocialPlatform, loadConnectionsLite, pageSocialProblem, socialMediaUrlProblem, socialTextProblem } from '@/lib/social/server';
 import { randomUUID } from 'crypto';
 
 export const maxDuration = 300; // large multi-client uploads fetch link previews
@@ -23,8 +24,8 @@ interface DraftRow {
   scheduled_for?: string | null;
   media_type?: string | null;
   media_url?: string | null;
-  platform?: string | null;        // 'facebook' (default) | 'instagram'
-  post_group_id?: string | null;   // same value on the FB and IG rows of one post (client-generated uuid)
+  platform?: string | null;        // 'facebook' (default) | 'instagram' | 'linkedin' | 'x'
+  post_group_id?: string | null;   // same value on every platform's row of one post (client-generated uuid)
 }
 
 /**
@@ -78,13 +79,14 @@ export async function POST(request: NextRequest) {
   const pageIds = Array.from(new Set(rows.map((r) => String(r.page_id)).filter((id) => UUID_RE.test(id))));
   const { data: pages, error: pagesErr } = await supabase
     .from('facebook_pages')
-    .select('id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, client_id, client:fb_clients!client_id(*)')
+    .select('id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, linkedin_org_id, linkedin_org_name, linkedin_connection_id, x_connection_id, client_id, client:fb_clients!client_id(*)')
     .in('id', pageIds);
   if (pagesErr) {
     console.error('drafts: pages lookup', pagesErr);
     return NextResponse.json({ error: 'Failed to load pages' }, { status: 500 });
   }
   const pageById = new Map<string, any>((pages || []).map((p: any) => [p.id, p]));
+  const connections = await loadConnectionsLite(supabase, (pages || []).flatMap((p: any) => [p.linkedin_connection_id, p.x_connection_id]));
 
   const skipped: { row: number; reason: string }[] = [];
   const byClient = new Map<string, { client: any; rows: { row: DraftRow; page: any; index: number; platform: Platform; groupId: string | null }[] }>();
@@ -98,7 +100,7 @@ export async function POST(request: NextRequest) {
     if (!content) return skipped.push({ row: index + 1, reason: 'empty post content' });
     if (content.length > MAX_POST_LENGTH) return skipped.push({ row: index + 1, reason: 'post content too long' });
     const platform = normalizePlatform(row.platform);
-    if (!platform) return skipped.push({ row: index + 1, reason: 'platform must be facebook or instagram' });
+    if (!platform) return skipped.push({ row: index + 1, reason: 'platform must be facebook, instagram, linkedin or x' });
     // Uploaded media arrives as a private storage:// reference (kept private until scheduled)
     const media = normalizeIncomingMediaUrl(row.media_url);
     if (!media.ok) return skipped.push({ row: index + 1, reason: 'invalid media_url' });
@@ -111,6 +113,16 @@ export async function POST(request: NextRequest) {
         igUserId: page.ig_user_id,
       });
       if (problem) return skipped.push({ row: index + 1, reason: `Instagram: ${problem}` });
+    }
+    if (isSocialPlatform(platform)) {
+      const values = { city: page.city, franchise_name: page.location_name, location_number: page.location_number, base_url: page.base_url, phone: page.phone };
+      const mediaType = normalizeMediaType(row.media_type);
+      const mediaUrl = mediaType ? media.value : null;
+      const link = platform === 'linkedin' && !mediaType ? replacePlaceholders(String(row.link_url || '').trim(), values) : '';
+      const problem = pageSocialProblem(platform, page, connections)
+        || socialMediaUrlProblem(platform, mediaType, mediaUrl)
+        || socialTextProblem(platform, replacePlaceholders(content, values), { hasMedia: !!mediaUrl, hasLink: !!link });
+      if (problem) return skipped.push({ row: index + 1, reason: `${platform === 'x' ? 'X' : 'LinkedIn'}: ${problem}` });
     }
     const groupId = row.post_group_id ? groupIds.get(String(row.post_group_id)) || null : null;
     const entry = byClient.get(page.client.id) || { client: page.client, rows: [] };
@@ -148,8 +160,9 @@ export async function POST(request: NextRequest) {
         base_url: page.base_url, phone: page.phone,
       };
       const mediaType = normalizeMediaType(row.media_type);
-      // Instagram has no link cards (links in captions aren't clickable)
-      const linkUrl = mediaType || platform === 'instagram' ? null : replacePlaceholders(String(row.link_url || '').trim(), values) || null;
+      // Instagram has no link cards (links in captions aren't clickable); X keeps links in the text.
+      // LinkedIn link_url becomes an article post.
+      const linkUrl = mediaType || platform === 'instagram' || platform === 'x' ? null : replacePlaceholders(String(row.link_url || '').trim(), values) || null;
       const scheduled = row.scheduled_for ? new Date(row.scheduled_for) : null;
       return {
         facebook_page_id: page.facebook_page_id,

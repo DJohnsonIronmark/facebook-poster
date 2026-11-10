@@ -4,10 +4,12 @@ import { useRef, useState } from 'react';
 import { uploadMediaFiles } from '@/lib/media/upload';
 import { validateIgVideo } from '@/lib/instagram/rules';
 import { prepareInstagramImage, readVideoMeta } from '@/lib/instagram/browser';
+import { socialMediaProblem, X_IMAGE_MAX_BYTES } from '@/lib/social/rules';
 
 // Replace a post's photo/video during review. The file goes straight to the PRIVATE drafts bucket
 // (signed upload), then the post is PATCHed with the storage reference. Instagram photos get the
-// same JPEG conversion + crop as bulk upload; Instagram videos are length-checked.
+// same JPEG conversion + crop as bulk upload; Instagram videos are length-checked. LinkedIn and X
+// use the original file like Facebook (only the file type, and X's 5 MB photo limit, are checked).
 
 interface Props {
   postId: string;
@@ -42,6 +44,10 @@ export default function ReplaceMediaButton({ postId, platform, mediaType, onRepl
         const issues = validateIgVideo(await readVideoMeta(file));
         if (issues.errors.length) throw new Error(issues.errors.join('; '));
         notes.push(...issues.warnings);
+      } else if (platform === 'linkedin' || platform === 'x') {
+        const problem = socialMediaProblem(platform, mediaType, file.name);
+        if (problem) throw new Error(problem);
+        if (platform === 'x' && mediaType === 'photo' && file.size > X_IMAGE_MAX_BYTES) throw new Error('X photos must be 5 MB or smaller');
       }
 
       const [ref] = await uploadMediaFiles([upload], 'draft');

@@ -8,10 +8,17 @@ import { instagramPublishConstraints, normalizeIncomingMediaUrl, publishDraftMed
 import { normalizePlatform } from '@/lib/instagram/rules';
 import { directPostDecision } from '@/lib/instagram/release';
 import { instagramPublishingEnabled, instagramRowProblem } from '@/lib/instagram/server';
+import { linkedinPublishingEnabled, xPublishingEnabled } from '@/lib/social/switches';
+import {
+  attachSocialIdentities, isSocialPlatform, loadConnectionsLite, loadPageMappings, pageSocialProblem, pickMappingFor,
+  socialMediaUrlProblem, socialPublishConstraints, socialTextProblem,
+} from '@/lib/social/server';
 
 // Direct (non-approval) scheduling path. All data access is server-side via the service role.
 // n8n "Facebook Daily Scheduled Publisher" publishes rows with status='pending' once scheduled_for
 // has passed (daily 6 AM run); same-day posts and "publish now" go straight to the n8n webhook.
+// LinkedIn / X rows are stored 'pending' (only while their switch is on) for the app's social
+// runner (/api/publish/social-run); they never go to the webhook and can't be published now.
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -31,6 +38,7 @@ export async function GET() {
   }
   // Review-workflow posts still hold private draft media until scheduled
   await signPostMedia(supabase, data || []);
+  await attachSocialIdentities(supabase, data || []);
   return NextResponse.json({ posts: data });
 }
 
@@ -55,11 +63,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Instagram: refused while INSTAGRAM_PUBLISHING_ENABLED is off; never "publish now"; never the
-    // Facebook webhook (lib/instagram/release.ts)
+    // Instagram / LinkedIn / X: refused while that platform's switch is off; never "publish now";
+    // never the Facebook webhook (lib/instagram/release.ts)
     const platform = normalizePlatform(body.platform);
-    if (!platform) return NextResponse.json({ error: 'platform must be facebook or instagram' }, { status: 400 });
-    const decision = directPostDecision({ platform, publishNow: !!publish_now, instagramEnabled: instagramPublishingEnabled() });
+    if (!platform) return NextResponse.json({ error: 'platform must be facebook, instagram, linkedin or x' }, { status: 400 });
+    const decision = directPostDecision({
+      platform, publishNow: !!publish_now, instagramEnabled: instagramPublishingEnabled(),
+      linkedinEnabled: linkedinPublishingEnabled(), xEnabled: xPublishingEnabled(),
+    });
     if (!decision.ok) return NextResponse.json({ error: decision.error }, { status: decision.status });
     const postGroupId = body.post_group_id ? String(body.post_group_id) : null;
     if (postGroupId && !UUID_RE.test(postGroupId)) return NextResponse.json({ error: 'Invalid post_group_id' }, { status: 400 });
@@ -73,7 +84,8 @@ export async function POST(request: NextRequest) {
     };
     const mediaType = normalizeMediaType(body.media_type);
     const processedContent = replacePlaceholders(post_content, placeholderValues);
-    const processedLinkUrl = mediaType || platform === 'instagram' ? '' : replacePlaceholders(link_url || '', placeholderValues);
+    // Instagram has no link cards; X keeps links in the text itself
+    const processedLinkUrl = mediaType || platform === 'instagram' || platform === 'x' ? '' : replacePlaceholders(link_url || '', placeholderValues);
 
     let scheduledIso: string | null = null;
     if (scheduled_for && !publish_now) {
@@ -81,8 +93,9 @@ export async function POST(request: NextRequest) {
       if (isNaN(d.getTime())) return NextResponse.json({ error: 'Invalid schedule date' }, { status: 400 });
       scheduledIso = d.toISOString();
     }
-    if (platform === 'instagram' && !scheduledIso) {
-      return NextResponse.json({ error: 'Instagram posts need a schedule date' }, { status: 400 });
+    if (platform !== 'facebook' && !scheduledIso) {
+      const label = platform === 'instagram' ? 'Instagram' : platform === 'linkedin' ? 'LinkedIn' : 'X';
+      return NextResponse.json({ error: `${label} posts need a schedule date` }, { status: 400 });
     }
     const viaWebhook = decision.useWebhookIfSameDay && (!!publish_now || isScheduledForToday(scheduledIso));
     if (viaWebhook && !N8N_WEBHOOK_URL) {
@@ -103,9 +116,22 @@ export async function POST(request: NextRequest) {
       });
       if (problem) return NextResponse.json({ error: `Instagram: ${problem}` }, { status: 400 });
     }
+    if (isSocialPlatform(platform)) {
+      const label = platform === 'x' ? 'X' : 'LinkedIn';
+      const mediaValue = mediaType && incoming.ok ? incoming.value : null;
+      const mappings = await loadPageMappings(supabase, [String(facebook_page_id)]);
+      const page = pickMappingFor(platform, mappings.get(String(facebook_page_id)));
+      if (!page) return NextResponse.json({ error: `${label}: page not found` }, { status: 400 });
+      const connections = await loadConnectionsLite(supabase, [page.linkedin_connection_id, page.x_connection_id]);
+      const problem = pageSocialProblem(platform, page, connections)
+        || socialMediaUrlProblem(platform, mediaType, mediaValue)
+        || socialTextProblem(platform, processedContent, { hasMedia: !!mediaValue, hasLink: !!processedLinkUrl });
+      if (problem) return NextResponse.json({ error: `${label}: ${problem}` }, { status: 400 });
+    }
     let publicMediaUrl: string | null = null;
     if (mediaType && incoming.ok) {
-      const constraints = platform === 'instagram' ? instagramPublishConstraints(mediaType) : {};
+      const constraints = platform === 'instagram' ? instagramPublishConstraints(mediaType)
+        : isSocialPlatform(platform) ? socialPublishConstraints(platform, mediaType) : {};
       const published = await publishDraftMedia(supabase, incoming.value, mediaType, constraints);
       if (!published.ok) return NextResponse.json({ error: `Media not published: ${published.error}` }, { status: 400 });
       publicMediaUrl = published.url;

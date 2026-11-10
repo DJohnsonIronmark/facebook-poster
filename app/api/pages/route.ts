@@ -4,8 +4,66 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { UUID_RE } from '@/lib/review/guards';
 import { TOKEN_COOKIE, cookieOptions } from '@/lib/facebook/oauth';
 import { IG_USER_ID_RE, cleanIgUsername } from '@/lib/instagram/rules';
+import { loadConnectionsLite } from '@/lib/social/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-const PAGE_COLUMNS = 'id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, ig_username, client_id, created_at';
+const PAGE_COLUMNS = 'id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, ig_username, client_id, created_at, linkedin_org_id, linkedin_org_name, linkedin_connection_id, x_connection_id';
+const LINKEDIN_ORG_ID_RE = /^[0-9]{1,20}$/;
+const SOCIAL_KEYS = ['linkedin_org_id', 'linkedin_org_name', 'linkedin_connection_id', 'x_connection_id'] as const;
+
+interface SocialPageFields {
+  linkedin_connection_id?: string | null;
+  x_connection_id?: string | null;
+  x_username?: string | null;
+  linkedin_connection_status?: string | null;
+  x_connection_status?: string | null;
+}
+
+/** Adds x_username + linkedin/x connection status (from fb_social_connections) to page rows. */
+async function attachConnectionInfo<T extends SocialPageFields>(supabase: SupabaseClient, pages: T[]): Promise<T[]> {
+  const conns = await loadConnectionsLite(supabase, pages.flatMap((p) => [p.linkedin_connection_id, p.x_connection_id]));
+  for (const p of pages) {
+    const li = p.linkedin_connection_id ? conns.get(p.linkedin_connection_id) : undefined;
+    const x = p.x_connection_id ? conns.get(p.x_connection_id) : undefined;
+    p.linkedin_connection_status = p.linkedin_connection_id ? li?.status ?? 'missing' : null;
+    p.x_connection_status = p.x_connection_id ? x?.status ?? 'missing' : null;
+    p.x_username = x?.username ?? null;
+  }
+  return pages;
+}
+
+/**
+ * Validates the LinkedIn / X mapping fields present in a PATCH body. Returns the patch to apply or
+ * an error. A connection must exist, match the provider, and be active.
+ */
+async function cleanSocialPatch(supabase: SupabaseClient, body: Record<string, unknown>): Promise<Record<string, string | null> | string> {
+  const patch: Record<string, string | null> = {};
+  if ('linkedin_org_id' in body) {
+    const v = body.linkedin_org_id;
+    if (v === null || v === '') { patch.linkedin_org_id = null; patch.linkedin_org_name = null; }
+    else if (typeof v === 'string' && LINKEDIN_ORG_ID_RE.test(v.trim())) patch.linkedin_org_id = v.trim();
+    else return 'LinkedIn organization id must be the numeric id (1–20 digits)';
+  }
+  if ('linkedin_org_name' in body && patch.linkedin_org_id !== null) {
+    const v = body.linkedin_org_name;
+    if (v === null || v === '') patch.linkedin_org_name = null;
+    else if (typeof v === 'string') patch.linkedin_org_name = v.trim().slice(0, 200) || null;
+    else return 'LinkedIn organization name must be text';
+  }
+  for (const [key, provider] of [['linkedin_connection_id', 'linkedin'], ['x_connection_id', 'x']] as const) {
+    if (!(key in body)) continue;
+    const v = body[key];
+    if (v === null || v === '') { patch[key] = null; continue; }
+    if (typeof v !== 'string' || !UUID_RE.test(v)) return `${key} must be a connection id`;
+    const conns = await loadConnectionsLite(supabase, [v]);
+    const c = conns.get(v);
+    const label = provider === 'x' ? 'X' : 'LinkedIn';
+    if (!c || c.provider !== provider) return `${label} account not found`;
+    if (c.status !== 'active') return `${label} account needs to be reconnected first`;
+    patch[key] = v;
+  }
+  return patch;
+}
 const FB_PAGE_ID_RE = /^\d{5,25}$/;
 
 interface PageInput {
@@ -66,7 +124,7 @@ export async function GET() {
     console.error('pages GET', error);
     return NextResponse.json({ error: 'Failed to fetch pages' }, { status: 500 });
   }
-  return NextResponse.json({ pages: data });
+  return NextResponse.json({ pages: await attachConnectionInfo(supabase, (data || []) as SocialPageFields[]) });
 }
 
 // POST - add pages, manually or imported from Facebook (admin/manager)
@@ -129,31 +187,49 @@ export async function POST(request: NextRequest) {
   return res;
 }
 
-// PATCH - edit a page's details (admin/manager). Page ID is not editable; add a new page instead.
+// PATCH - edit a page (admin/manager for details; admin for the LinkedIn / X mapping).
+//   details: { id, location_name, location_number?, city?, base_url?, phone?, ig_user_id?, ig_username? }
+//   mapping: { id, linkedin_org_id?, linkedin_org_name?, linkedin_connection_id?, x_connection_id? }
+// Details are only updated when location_name is in the body, so a mapping-only PATCH leaves them alone.
+// Page ID is not editable; add a new page instead.
 export async function PATCH(request: NextRequest) {
-  const { error: authError } = await requireRole(['admin', 'manager']);
+  const body: Record<string, unknown> = await request.json().catch(() => ({}));
+  const hasSocial = SOCIAL_KEYS.some((k) => k in body);
+  const hasDetails = 'location_name' in body;
+  const { error: authError } = await requireRole(hasSocial ? ['admin'] : ['admin', 'manager']);
   if (authError) return authError;
 
-  const body = await request.json().catch(() => ({}));
   const id = String(body.id || '');
   if (!UUID_RE.test(id)) return NextResponse.json({ error: 'Valid page id required' }, { status: 400 });
+  if (!hasSocial && !hasDetails) return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
 
   const supabase = createServiceClient();
   const { data: current } = await supabase.from('facebook_pages').select('facebook_page_id').eq('id', id).maybeSingle();
   if (!current) return NextResponse.json({ error: 'Page not found' }, { status: 404 });
 
-  const r = cleanPage({ ...body, facebook_page_id: current.facebook_page_id });
-  if (typeof r === 'string') return NextResponse.json({ error: r }, { status: 400 });
+  const update: Record<string, unknown> = {};
+  if (hasDetails) {
+    const r = cleanPage({ ...body, facebook_page_id: current.facebook_page_id });
+    if (typeof r === 'string') return NextResponse.json({ error: r }, { status: 400 });
+    Object.assign(update, {
+      location_name: r.location_name, location_number: r.location_number, city: r.city, base_url: r.base_url, phone: r.phone,
+      ig_user_id: r.ig_user_id, ig_username: r.ig_username,
+    });
+  }
+  if (hasSocial) {
+    const social = await cleanSocialPatch(supabase, body);
+    if (typeof social === 'string') return NextResponse.json({ error: social }, { status: 400 });
+    Object.assign(update, social);
+  }
+  if (Object.keys(update).length === 0) return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
 
   const { data, error } = await supabase
     .from('facebook_pages')
-    .update({
-      location_name: r.location_name, location_number: r.location_number, city: r.city, base_url: r.base_url, phone: r.phone,
-      ig_user_id: r.ig_user_id, ig_username: r.ig_username,
-    })
+    .update(update)
     .eq('id', id)
     .select(PAGE_COLUMNS)
     .single();
-  if (error) return NextResponse.json({ error: 'Failed to update page' }, { status: 500 });
-  return NextResponse.json({ page: data });
+  if (error || !data) return NextResponse.json({ error: 'Failed to update page' }, { status: 500 });
+  const [page] = await attachConnectionInfo(supabase, [data as SocialPageFields]);
+  return NextResponse.json({ page });
 }

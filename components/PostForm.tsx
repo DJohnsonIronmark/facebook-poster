@@ -7,12 +7,16 @@ import FacebookPostPreview from './FacebookPostPreview';
 import InstagramPostPreview from './InstagramPostPreview';
 import PlatformBadge from './PlatformBadge';
 import IgCaptionMeter from './IgCaptionMeter';
+import LinkedInPostPreview from './LinkedInPostPreview';
+import XPostPreview from './XPostPreview';
+import SocialTextMeter from './SocialTextMeter';
 import { replacePlaceholders } from '@/lib/placeholders';
 import { ACCEPT_MEDIA, MEDIA_HELP, baseName, fileExtension, mapRowsToFiles, validateMediaFile, type RowMediaStatus } from '@/lib/media/mapping';
 import { uploadMediaFiles } from '@/lib/media/upload';
 // MM/DD/YYYY [h:mm AM|PM] (local) or ISO → ISO; same rules the CSV importer always used
 import { parseScheduledDate } from '@/lib/csv';
-import { evaluateInstagramTarget, parsePlatformsCell, type IgTargetMedia, type Platform } from '@/lib/instagram/rules';
+import { evaluateInstagramTarget, parsePlatformsCell, PLATFORM_LABEL, type IgTargetMedia, type Platform } from '@/lib/instagram/rules';
+import { evaluateSocialTarget, pageHasLinkedIn, pageHasX, pageReadyFor, platformCountPhrase, useSocialStatus, type SocialPlatform } from '@/lib/social/ui';
 import { analyzeInstagramMedia, releaseIgMedia, type IgMediaInfo } from '@/lib/instagram/browser';
 
 interface PostFormProps {
@@ -42,7 +46,7 @@ function preparedIssues(info: IgMediaInfo | null | undefined): { errors: string[
 const pageValues = (pg: FacebookPage | null | undefined) =>
   pg ? { city: pg.city, franchise_name: pg.location_name, location_number: pg.location_number, base_url: pg.base_url, phone: pg.phone } : {};
 
-/** One id per post whose Facebook and Instagram versions are linked (validated and re-issued server-side) */
+/** One id per post whose platform versions are linked (validated and re-issued server-side) */
 const newGroupId = (platforms: Platform[]) => (platforms.length > 1 ? crypto.randomUUID() : null);
 
 // Sends rows for approval-enabled clients into the review queue; returns a human summary
@@ -72,6 +76,8 @@ interface CSVRow {
   media_url: string;
   platforms: string;
   ig_caption: string;
+  linkedin_text: string;
+  x_text: string;
 }
 
 interface RowPlan {
@@ -81,7 +87,11 @@ interface RowPlan {
   warnings: string[];
   pending: boolean;
   igCaption: string;
+  liText: string;   // placeholders filled in
+  xText: string;
 }
+
+const SOCIAL: SocialPlatform[] = ['linkedin', 'x'];
 
 const MEDIA_FILE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov'];
 const isCsvFile = (f: File) => fileExtension(f.name) === 'csv' || f.type === 'text/csv';
@@ -130,6 +140,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [wantIg, setWantIg] = useState(false);
   const [igCaption, setIgCaption] = useState('');
   const [singleIg, setSingleIg] = useState<IgMediaInfo | null>(null);
+  // LinkedIn / X (original media file; optional per-platform text)
+  const socialStatus = useSocialStatus();
+  const [wantLi, setWantLi] = useState(false);
+  const [wantX, setWantX] = useState(false);
+  const [liText, setLiText] = useState('');
+  const [xText, setXText] = useState('');
   // Bulk: Instagram analysis per media file (JPEG derivative for photos, length/shape for videos)
   const [igMedia, setIgMedia] = useState<Map<File, IgMediaInfo>>(new Map());
   const igInFlight = useRef(new Set<File>());
@@ -213,7 +229,49 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     return { errors: label(errors), warnings: label(warnings), pending };
   })();
   const singleIgBlocked = wantIg && (singleIgCheck.pending || singleIgCheck.errors.length > 0);
-  const singlePlatforms: Platform[] = [...(wantFb ? ['facebook' as const] : []), ...(wantIg ? ['instagram' as const] : [])];
+
+  // Single post: LinkedIn / X checks per selected page (same grouping of messages as Instagram)
+  const socialEnabled = (p: SocialPlatform) => (socialStatus ? socialStatus[p].enabled : false);
+  const socialTextFor = (p: SocialPlatform) => (p === 'linkedin' ? liText : xText).trim() || postContent;
+  const singleSocialCheck = (platform: SocialPlatform) => {
+    const errors = new Map<string, string[]>();
+    const warnings = new Map<string, string[]>();
+    const kind = mediaType === 'text' ? null : mediaType;
+    const mediaName = kind ? (mediaInputMode === 'url' ? mediaUrl.trim() || null : selectedFile?.name || null) : null;
+    for (const pg of selectedPages) {
+      const r = evaluateSocialTarget({
+        platform,
+        text: replacePlaceholders(socialTextFor(platform), pageValues(pg)),
+        pageFound: true,
+        pageReady: pageReadyFor(platform, pg),
+        mediaType: kind,
+        mediaName,
+        fileSize: mediaInputMode === 'file' ? selectedFile?.size ?? null : null,
+        hasLink: !kind && !!linkUrl.trim(),
+        droppedLink: !kind && !!linkUrl.trim(),
+        direct: !needsApproval(pg),
+        enabled: socialEnabled(platform),
+        hasSchedule: !!scheduledFor,
+        publishNow,
+      });
+      r.errors.forEach((e) => errors.set(e, [...(errors.get(e) || []), pg.location_name]));
+      r.warnings.forEach((w) => warnings.set(w, [...(warnings.get(w) || []), pg.location_name]));
+    }
+    const label = (m: Map<string, string[]>) => Array.from(m.entries()).map(([msg, names]) =>
+      selectedPages.length > 1 && names.length < selectedPages.length ? `${msg} (${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''})` : msg);
+    return { errors: label(errors), warnings: label(warnings) };
+  };
+  const EMPTY_CHECK = { errors: [] as string[], warnings: [] as string[] };
+  const singleLiCheck = wantLi ? singleSocialCheck('linkedin') : EMPTY_CHECK;
+  const singleXCheck = wantX ? singleSocialCheck('x') : EMPTY_CHECK;
+  const singleSocialBlocked = singleLiCheck.errors.length > 0 || singleXCheck.errors.length > 0;
+  // A platform checkbox is unavailable when none of the selected pages is mapped to it
+  const liUnavailable = selectedPages.length > 0 && !selectedPages.some(pageHasLinkedIn);
+  const xUnavailable = selectedPages.length > 0 && !selectedPages.some(pageHasX);
+  const singlePlatforms: Platform[] = [
+    ...(wantFb ? ['facebook' as const] : []), ...(wantIg ? ['instagram' as const] : []),
+    ...(wantLi ? ['linkedin' as const] : []), ...(wantX ? ['x' as const] : []),
+  ];
 
   // Handle CSV drag and drop
   const handleDragOver = (e: React.DragEvent) => {
@@ -338,18 +396,20 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         throw new Error('Please enter post content');
       }
 
-      if (singlePlatforms.length === 0) throw new Error('Choose Facebook, Instagram or both');
+      if (singlePlatforms.length === 0) throw new Error('Choose at least one of Facebook, Instagram, LinkedIn or X');
       if (wantIg && singleIgCheck.pending) throw new Error('Still preparing the Instagram version of your media…');
       if (wantIg && singleIgCheck.errors.length > 0) throw new Error(`Instagram: ${singleIgCheck.errors[0]}`);
+      if (singleLiCheck.errors.length > 0) throw new Error(`LinkedIn: ${singleLiCheck.errors[0]}`);
+      if (singleXCheck.errors.length > 0) throw new Error(`X: ${singleXCheck.errors[0]}`);
       const purpose = selectedPages.some(needsApproval) ? 'draft' : 'direct';
 
-      // Media: Facebook keeps the original file; an Instagram photo uses its JPEG derivative
-      // (a separate upload); an Instagram video shares the original file.
+      // Media: Facebook, LinkedIn and X use the original file; an Instagram photo uses its JPEG
+      // derivative (a separate upload); an Instagram video shares the original file.
       let finalMediaUrl: string | null = null;
       if (mediaType !== 'text') {
         if (mediaInputMode === 'file') {
           if (!selectedFile) throw new Error('Please select a media file');
-          if (wantFb || mediaType === 'video') {
+          if (wantFb || wantLi || wantX || mediaType === 'video') {
             finalMediaUrl = uploadedUrl || await uploadFile(purpose);
             if (!finalMediaUrl) throw new Error('Failed to upload media file');
           }
@@ -369,8 +429,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       }
 
       const groupByPage = new Map(selectedPages.map((p) => [p.id, newGroupId(singlePlatforms)]));
-      const contentFor = (platform: Platform) => (platform === 'instagram' ? igCaption.trim() || postContent.trim() : postContent.trim());
-      const linkFor = (platform: Platform) => (platform === 'facebook' && mediaType === 'text' ? (linkUrl.trim() || null) : null);
+      const contentFor = (platform: Platform) => (platform === 'instagram' ? igCaption.trim() || postContent.trim()
+        : platform === 'linkedin' ? liText.trim() || postContent.trim()
+        : platform === 'x' ? xText.trim() || postContent.trim()
+        : postContent.trim());
+      // Facebook and LinkedIn (article) take the link on text posts; X never gets link_url
+      const linkFor = (platform: Platform) => ((platform === 'facebook' || platform === 'linkedin') && mediaType === 'text' ? (linkUrl.trim() || null) : null);
       const mediaFor = (platform: Platform) => (platform === 'instagram' ? igMediaUrl : finalMediaUrl);
 
       // Pages whose client uses the approval workflow go to the review queue instead
@@ -419,7 +483,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             body: JSON.stringify(payload),
           });
 
-          return { page: platform === 'instagram' ? `${page.location_name} (Instagram)` : page.location_name, response };
+          return { page: platform === 'facebook' ? page.location_name : `${page.location_name} (${PLATFORM_LABEL[platform]})`, response };
         }))
       );
 
@@ -438,6 +502,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       // Reset form
       setPostContent('');
       setIgCaption('');
+      setLiText('');
+      setXText('');
       setLinkUrl('');
       setScheduledFor('');
       setPublishNow(false);
@@ -540,11 +606,37 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       warnings.push(...r.warnings.map((w) => `Instagram: ${w}`));
       pending = r.pending;
     }
-    return { page, platforms, errors, warnings, pending, igCaption };
+    const liText = replacePlaceholders(row.linkedin_text || row.post_content, pageValues(page));
+    const xText = replacePlaceholders(row.x_text || row.post_content, pageValues(page));
+    const kind = ms?.state === 'file' || ms?.state === 'url' ? ms.kind : null;
+    const mediaName = ms?.state === 'file' ? mediaFiles[ms.fileIndex]?.name || null : ms?.state === 'url' ? row.media_url.trim() : null;
+    for (const sp of SOCIAL) {
+      if (!platforms.includes(sp)) continue;
+      const r = evaluateSocialTarget({
+        platform: sp,
+        text: sp === 'linkedin' ? liText : xText,
+        pageFound: !!page,
+        pageReady: pageReadyFor(sp, page),
+        mediaType: kind,
+        mediaName,
+        fileSize: ms?.state === 'file' ? mediaFiles[ms.fileIndex]?.size ?? null : null,
+        hasLink: !kind && !!row.link_url.trim(),
+        droppedLink: !kind && !!row.link_url.trim(),
+        direct: !!page && !needsApproval(page),
+        enabled: socialEnabled(sp),
+        hasSchedule: !!parseScheduledDate(row.scheduled_for),
+      });
+      errors.push(...r.errors.map((e) => `${PLATFORM_LABEL[sp]}: ${e}`));
+      warnings.push(...r.warnings.map((w) => `${PLATFORM_LABEL[sp]}: ${w}`));
+    }
+    return { page, platforms, errors, warnings, pending, igCaption, liText, xText };
   });
   const errorRows = rowPlans.map((p, i) => (p.errors.length ? i : -1)).filter((i) => i >= 0);
   const igPreparing = rowPlans.some((p) => p.pending);
   const bulkIgCount = rowPlans.filter((p) => p.platforms.includes('instagram')).length;
+  const bulkPlatformCounts: Partial<Record<Platform, number>> = {};
+  rowPlans.forEach((p) => p.platforms.forEach((pl) => { bulkPlatformCounts[pl] = (bulkPlatformCounts[pl] || 0) + 1; }));
+  const bulkSocialOff = SOCIAL.filter((sp) => (bulkPlatformCounts[sp] || 0) > 0 && !socialEnabled(sp));
 
   const removeErroredRows = () => {
     const bad = new Set(errorRows);
@@ -586,14 +678,14 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       if (igPreparing) throw new Error('Still preparing Instagram media; try again in a moment');
 
       // Upload each referenced file once (rows for unknown pages are skipped), straight to storage.
-      // Originals serve Facebook posts and Instagram videos; Instagram photos use their JPEG derivative.
+      // Originals serve Facebook, LinkedIn and X posts and Instagram videos; Instagram photos use their JPEG derivative.
       const originalFiles = new Set<number>();
       const igPhotoFiles = new Set<number>();
       csvData.forEach((_, i) => {
         const s = statuses[i];
         const plan = rowPlans[i];
         if (s.state !== 'file' || !plan.page) return;
-        if (plan.platforms.includes('facebook') || (plan.platforms.includes('instagram') && s.kind === 'video')) originalFiles.add(s.fileIndex);
+        if (plan.platforms.some((pl) => pl !== 'instagram') || (plan.platforms.includes('instagram') && s.kind === 'video')) originalFiles.add(s.fileIndex);
         if (plan.platforms.includes('instagram') && s.kind === 'photo') igPhotoFiles.add(s.fileIndex);
       });
       const uploads: { key: string; file: File }[] = [
@@ -636,13 +728,18 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           failedRows.push(`${row.location_number || row.location_name} (page not found)`);
           continue;
         }
-        // One CSV row for fb,ig → two posts sharing a post_group_id
+        // One CSV row for several platforms → one post per platform sharing a post_group_id
         const groupId = newGroupId(platforms);
 
         for (const platform of platforms) {
           const media = mediaFor(index, row, platform);
-          const content = platform === 'instagram' ? (row.ig_caption || row.post_content) : row.post_content;
-          const link = platform === 'facebook' && !media.media_type ? (row.link_url || null) : null;
+          // Stored text keeps its placeholders (filled in server-side, like post_content)
+          const content = platform === 'instagram' ? (row.ig_caption || row.post_content)
+            : platform === 'linkedin' ? (row.linkedin_text || row.post_content)
+            : platform === 'x' ? (row.x_text || row.post_content)
+            : row.post_content;
+          // Facebook and LinkedIn (article) take link_url on text posts; X never does
+          const link = (platform === 'facebook' || platform === 'linkedin') && !media.media_type ? (row.link_url || null) : null;
 
           // Approval-workflow clients: queue as drafts for internal → client review
           if (needsApproval(page)) {
@@ -687,7 +784,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             successCount++;
           } else {
             const data = await response.json().catch(() => ({}));
-            failedRows.push(`${row.location_name || row.location_number}${platform === 'instagram' ? ' (Instagram)' : ''} (${data.error || 'API error'})`);
+            failedRows.push(`${row.location_name || row.location_number}${platform === 'facebook' ? '' : ` (${PLATFORM_LABEL[platform]})`} (${data.error || 'API error'})`);
           }
         }
       }
@@ -836,6 +933,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         media_url: row.media_url || '',
         platforms: row.platforms || '',
         ig_caption: row.ig_caption || '',
+        linkedin_text: row.linkedin_text || '',
+        x_text: row.x_text || '',
       });
     }
 
@@ -867,7 +966,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const downloadTemplate = () => {
     // 'notes' is for people reading the file; the importer ignores columns it doesn't know.
-    const headers = ['location_number', 'location_name', 'platforms', 'post_content', 'ig_caption', 'link_url', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
+    const headers = ['location_number', 'location_name', 'platforms', 'post_content', 'ig_caption', 'linkedin_text', 'x_text', 'link_url', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
     // One franchise example (matched on location_number) and non-franchise examples (blank
     // location_number, matched on the exact page name). Dates are 95+ days out so a test upload
     // can be reviewed and deleted long before it's due.
@@ -881,17 +980,25 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     // Example pages are deliberately fake: uploading the template unchanged reports "page not found"
     // for every row and never creates posts on a real client page. Replace with real pages.
     const EXAMPLE_NOTE = 'EXAMPLE ROW: replace the page with a real one from the Pages tab (or delete this row).';
+    // Columns: location_number, location_name, platforms, post_content, ig_caption, linkedin_text, x_text,
+    //          link_url, scheduled_for, media_type, media_file, media_url, notes
     const exampleRows = [
-      ['0001', 'Example Franchise Location A', 'fb', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '', '{{BASEURL}}', daysOut(95, 9), '', '', '',
+      ['0001', 'Example Franchise Location A', 'fb', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '', '', '', '{{BASEURL}}', daysOut(95, 9), '', '', '',
         `FRANCHISE LOCATION, text + link: location_number is matched first (name is a fallback). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. platforms fb (or blank) = Facebook only. ${EXAMPLE_NOTE}`],
-      ['0002', 'Example Franchise Location B', 'fb', 'Photo post for {{CITY}}.', '', '', daysOut(95, 11), 'photo', 'example-photo.jpg', '',
+      ['0002', 'Example Franchise Location B', 'fb', 'Photo post for {{CITY}}.', '', '', '', '', daysOut(95, 11), 'photo', 'example-photo.jpg', '',
         `FRANCHISE LOCATION, photo: media_file = the name of an image you upload together with this CSV (JPG/PNG/GIF/WEBP, max 10 MB). Several rows can use the same file. media_type can be left blank (detected from the file). link_url is ignored for photos. ${EXAMPLE_NOTE}`],
-      ['0003', 'Example Franchise Location C', 'fb', 'Video post for {{CITY}}.', '', '', daysOut(96, 9), 'video', 'example-video.mp4', '',
+      ['0003', 'Example Franchise Location C', 'fb', 'Video post for {{CITY}}.', '', '', '', '', daysOut(96, 9), 'video', 'example-video.mp4', '',
         `FRANCHISE LOCATION, video: media_file = the name of a video you upload with this CSV (MP4/MOV, max 100 MB). Instead of a file you can put a public https link in media_url and leave media_file blank. ${EXAMPLE_NOTE}`],
-      ['', 'Example Brand Page', 'fb', 'Text-only post for a non-franchise page.', '', '', daysOut(96, 11), '', '', '',
+      ['', 'Example Brand Page', 'fb', 'Text-only post for a non-franchise page.', '', '', '', '', daysOut(96, 11), '', '', '',
         `NON-FRANCHISE PAGE (e.g. IANA): leave location_number blank and put the page name exactly as on the Pages tab. Text only = leave link_url/media blank. Skip {{CITY}}/{{PHONE}}/{{BASEURL}} unless set for the page. ${EXAMPLE_NOTE}`],
-      ['0004', 'Example Franchise Location D', 'fb,ig', 'Photo post for {{CITY}} on Facebook. Learn more at {{BASEURL}}', 'Photo post for {{CITY}} on Instagram. Link in bio! #homecare #{{CITY}}', '', daysOut(97, 9), 'photo', 'example-photo.jpg', '',
+      ['0004', 'Example Franchise Location D', 'fb,ig', 'Photo post for {{CITY}} on Facebook. Learn more at {{BASEURL}}', 'Photo post for {{CITY}} on Instagram. Link in bio! #homecare #{{CITY}}', '', '', '', daysOut(97, 9), 'photo', 'example-photo.jpg', '',
         `FACEBOOK + INSTAGRAM: platforms fb,ig makes two linked posts (Facebook and Instagram, reviewed side by side); ig = Instagram only. Instagram needs a photo or video and an Instagram account ID on the page (Pages tab). ig_caption is optional (blank = post_content); max 2,200 characters and 30 hashtags (5 or fewer recommended); links are not clickable on Instagram. Photos are converted to JPEG and center-cropped to 4:5-1.91:1 for Instagram (the Facebook post keeps the original); videos must be MP4/MOV, 3 s to 15 min, ideally 9:16. ${EXAMPLE_NOTE}`],
+      ['0005', 'Example Franchise Location E', 'fb,ig,li,x', 'Photo post for {{CITY}} on Facebook. Learn more at {{BASEURL}}', 'Photo post for {{CITY}} on Instagram. Link in bio!', 'Photo post for {{CITY}} on LinkedIn. We are hiring caregivers: {{BASEURL}}', 'Photo post for {{CITY}} on X. {{BASEURL}}', '', daysOut(97, 11), 'photo', 'example-photo.jpg', '',
+        `ALL FOUR PLATFORMS: platforms fb,ig,li,x makes four linked posts reviewed side by side. li = LinkedIn, x = X. LinkedIn needs the page mapped to a LinkedIn company page and X needs an X account (Pages tab). LinkedIn and X use the original photo/video (JPG/PNG/GIF for LinkedIn, JPG/PNG/GIF/WEBP up to 5 MB for X; video MP4). linkedin_text / x_text are optional (blank = post_content); LinkedIn max 3,000 characters; X max 280 with every link counted as 23. ${EXAMPLE_NOTE}`],
+      ['0006', 'Example Franchise Location F', 'li', 'Article post for {{CITY}} on LinkedIn.', '', 'Read our new caregiving guide for {{CITY}} families.', '', '{{BASEURL}}', daysOut(98, 9), '', '', '',
+        `LINKEDIN ONLY, article: platforms li. With no photo/video, link_url becomes a LinkedIn article card. linkedin_text overrides post_content for LinkedIn. ${EXAMPLE_NOTE}`],
+      ['0007', 'Example Franchise Location G', 'x', 'Text post for {{CITY}} on X.', '', '', 'Now serving {{CITY}}! Call {{PHONE}}.', '', daysOut(98, 11), '', '', '',
+        `X ONLY: platforms x. X never uses link_url: put a URL in x_text if you want one (X charges about $0.20 per post with a link vs $0.015 without). Max 280 characters, links count as 23. ${EXAMPLE_NOTE}`],
     ];
 
     const csv = [
@@ -1007,7 +1114,36 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     <input type="checkbox" checked={wantIg} onChange={(e) => setWantIg(e.target.checked)} className="w-4 h-4" disabled={submitting} />
                     <span className="text-sm text-gray-700">Instagram</span>
                   </label>
+                  <label className={`flex items-center gap-2 ${liUnavailable && !wantLi ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+                    title={liUnavailable ? 'None of the selected pages has a LinkedIn company page set (Pages tab)' : undefined}>
+                    <input type="checkbox" checked={wantLi} onChange={(e) => setWantLi(e.target.checked)} className="w-4 h-4"
+                      disabled={submitting || (liUnavailable && !wantLi)} aria-describedby={liUnavailable ? 'liUnavailableHint' : undefined} />
+                    <span className="text-sm text-gray-700">LinkedIn</span>
+                  </label>
+                  <label className={`flex items-center gap-2 ${xUnavailable && !wantX ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+                    title={xUnavailable ? 'None of the selected pages has an X account set (Pages tab)' : undefined}>
+                    <input type="checkbox" checked={wantX} onChange={(e) => setWantX(e.target.checked)} className="w-4 h-4"
+                      disabled={submitting || (xUnavailable && !wantX)} aria-describedby={xUnavailable ? 'xUnavailableHint' : undefined} />
+                    <span className="text-sm text-gray-700">X</span>
+                  </label>
                 </div>
+                {liUnavailable && (
+                  <p id="liUnavailableHint" className="mt-1 text-xs text-gray-500">
+                    LinkedIn: none of the selected pages has a LinkedIn company page set yet (Pages tab → LinkedIn column).
+                  </p>
+                )}
+                {xUnavailable && (
+                  <p id="xUnavailableHint" className="mt-1 text-xs text-gray-500">
+                    X: none of the selected pages has an X account set yet (Pages tab → X column).
+                  </p>
+                )}
+                {(wantLi || wantX) && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    LinkedIn and X use the original photo or video. LinkedIn takes the link on text posts as an article card; X never uses the link field.
+                    {SOCIAL.filter((sp) => (sp === 'linkedin' ? wantLi : wantX) && !socialEnabled(sp)).map((sp) =>
+                      ` ${PLATFORM_LABEL[sp]} publishing is not enabled yet: ${PLATFORM_LABEL[sp]} posts can be drafted for client approval but are not scheduled.`).join('')}
+                  </p>
+                )}
                 {wantIg && (
                   <p className="mt-1 text-xs text-gray-500">
                     Instagram needs a photo or video and an Instagram account on each page (Pages tab). Photos are converted to JPEG and
@@ -1015,7 +1151,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     {!igEnabled && ' Instagram publishing is not enabled yet: Instagram posts can be drafted for client approval but are not scheduled.'}
                   </p>
                 )}
-                {!wantFb && !wantIg && <p className="mt-1 text-sm text-red-600">Choose at least one.</p>}
+                {singlePlatforms.length === 0 && <p className="mt-1 text-sm text-red-600">Choose at least one.</p>}
               </fieldset>
 
               {/* Post Content */}
@@ -1076,6 +1212,34 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <IgCaptionMeter id="igCaptionMeter" caption={replacePlaceholders(igCaption.trim() || postContent, pageValues(selectedPages[0]))} />
                 </div>
               )}
+
+              {SOCIAL.filter((sp) => (sp === 'linkedin' ? wantLi : wantX)).map((sp) => {
+                const label = PLATFORM_LABEL[sp];
+                const value = sp === 'linkedin' ? liText : xText;
+                const setValue = sp === 'linkedin' ? setLiText : setXText;
+                return (
+                  <div key={sp}>
+                    <label htmlFor={`${sp}Text`} className="block text-sm font-medium text-gray-700 mb-2">
+                      {label} text (optional; blank uses the post content)
+                    </label>
+                    <textarea
+                      id={`${sp}Text`}
+                      value={value}
+                      onChange={(e) => setValue(e.target.value)}
+                      rows={sp === 'x' ? 3 : 4}
+                      aria-describedby={`${sp}TextMeter`}
+                      className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                      placeholder={sp === 'x'
+                        ? 'X version of the text (280 characters; each link counts as 23). Put a URL here if you want one; X posts with a link cost more.'
+                        : 'LinkedIn version of the text (up to 3,000 characters).'}
+                      disabled={submitting}
+                    />
+                    <SocialTextMeter id={`${sp}TextMeter`} platform={sp}
+                      text={replacePlaceholders(value.trim() || postContent, pageValues(selectedPages[0]))}
+                      hasMedia={mediaType !== 'text'} hasLink={sp === 'linkedin' && mediaType === 'text' && !!linkUrl.trim()} />
+                  </div>
+                );
+              })}
 
               {/* Media Type Selector */}
               <div>
@@ -1305,6 +1469,30 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                               />
                             </div>
                           )}
+                          {wantLi && (
+                            <div className="space-y-1">
+                              <PlatformBadge platform="linkedin" />
+                              <LinkedInPostPreview
+                                orgName={pg?.linkedin_org_name || pg?.location_name || 'Your company page'}
+                                content={replacePlaceholders(liText.trim() || postContent, vals)}
+                                linkUrl={mediaType === 'text' ? replacePlaceholders(linkUrl, vals) || null : null}
+                                mediaType={mediaType !== 'text' ? mediaType : null}
+                                mediaUrl={mediaType === 'text' ? null : (mediaInputMode === 'url' ? mediaUrl : previewUrl)}
+                              />
+                            </div>
+                          )}
+                          {wantX && (
+                            <div className="space-y-1">
+                              <PlatformBadge platform="x" />
+                              <XPostPreview
+                                displayName={pg?.location_name || 'Your page'}
+                                username={pg?.x_username}
+                                content={replacePlaceholders(xText.trim() || postContent, vals)}
+                                mediaType={mediaType !== 'text' ? mediaType : null}
+                                mediaUrl={mediaType === 'text' ? null : (mediaInputMode === 'url' ? mediaUrl : previewUrl)}
+                              />
+                            </div>
+                          )}
                           {wantIg && (
                             <div className="space-y-1">
                               <PlatformBadge platform="instagram" />
@@ -1330,6 +1518,15 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 <div className="rounded-lg border px-4 py-3 text-sm space-y-1" role="status">
                   {singleIgCheck.errors.map((e) => <p key={e} className="text-red-700">Instagram: {e}</p>)}
                   {singleIgCheck.warnings.map((w) => <p key={w} className="text-amber-700">Instagram: {w}</p>)}
+                </div>
+              )}
+
+              {selectedPages.length > 0 && [...singleLiCheck.errors, ...singleLiCheck.warnings, ...singleXCheck.errors, ...singleXCheck.warnings].length > 0 && (
+                <div className="rounded-lg border px-4 py-3 text-sm space-y-1" role="status">
+                  {singleLiCheck.errors.map((e) => <p key={`li-${e}`} className="text-red-700">LinkedIn: {e}</p>)}
+                  {singleXCheck.errors.map((e) => <p key={`x-${e}`} className="text-red-700">X: {e}</p>)}
+                  {singleLiCheck.warnings.map((w) => <p key={`liw-${w}`} className="text-amber-700">LinkedIn: {w}</p>)}
+                  {singleXCheck.warnings.map((w) => <p key={`xw-${w}`} className="text-amber-700">X: {w}</p>)}
                 </div>
               )}
 
@@ -1412,6 +1609,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     uploading ||
                     singlePlatforms.length === 0 ||
                     singleIgBlocked ||
+                    singleSocialBlocked ||
                     selectedPageIds.length === 0 ||
                     !postContent.trim() ||
                     (mediaType !== 'text' && mediaInputMode === 'file' && !selectedFile) ||
@@ -1422,6 +1620,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     uploading ||
                     singlePlatforms.length === 0 ||
                     singleIgBlocked ||
+                    singleSocialBlocked ||
                     selectedPageIds.length === 0 ||
                     !postContent.trim() ||
                     (mediaType !== 'text' && mediaInputMode === 'file' && !selectedFile) ||
@@ -1547,7 +1746,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-sm font-medium text-gray-700">
-                      Preview ({csvData.length} posts)
+                      Preview ({csvData.length} row{csvData.length === 1 ? '' : 's'}{platformCountPhrase(bulkPlatformCounts) ? ` → ${platformCountPhrase(bulkPlatformCounts)}` : ''})
                     </h3>
                     <button type="button" onClick={() => setShowBulkPreviews(!showBulkPreviews)}
                       className="text-sm text-blue-600 hover:text-blue-800">
@@ -1560,6 +1759,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                       4:5–1.91:1 for Instagram (shown in the previews); Facebook keeps the original file.
                       {!igEnabled && ' Instagram publishing is not enabled yet, so Instagram posts are drafted for client approval but not scheduled.'}
                       {igPreparing && ' Preparing Instagram media…'}
+                    </div>
+                  )}
+                  {((bulkPlatformCounts.linkedin || 0) > 0 || (bulkPlatformCounts.x || 0) > 0) && (
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 mb-3 text-sm text-slate-900">
+                      <strong>LinkedIn / X</strong>: LinkedIn and X posts use the original photo or video. X posts never use link_url.
+                      {bulkSocialOff.length > 0 && ` ${bulkSocialOff.map((sp) => PLATFORM_LABEL[sp]).join(' and ')} publishing is not enabled yet, so those posts are drafted for client approval but not scheduled.`}
                     </div>
                   )}
                   {bulkApprovalCount > 0 && (
@@ -1584,11 +1789,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                         const ig = plan.platforms.includes('instagram') ? igPreviewFor(index, row) : null;
                         return (
                           <div key={index} className={both ? 'space-y-1' : undefined} style={both ? { gridColumn: '1 / -1' } : undefined}
-                            role={both ? 'group' : undefined} aria-label={both ? `Row ${index + 2}: Facebook and Instagram versions` : undefined}>
+                            role={both ? 'group' : undefined} aria-label={both ? `Row ${index + 2}: ${plan.platforms.map((pl) => PLATFORM_LABEL[pl]).join(', ')} versions` : undefined}>
                             {!pg && <p className="text-xs text-red-600 mb-1">Row {index + 2}: page not found</p>}
                             {plan.errors.map((e) => <p key={e} className="text-xs text-red-600 mb-1">Row {index + 2}: {e}</p>)}
                             {plan.warnings.map((w) => <p key={w} className="text-xs text-amber-700 mb-1">Row {index + 2}: {w}</p>)}
-                            <div className={both ? 'grid gap-4 md:grid-cols-2' : undefined}>
+                            <div className={both ? `grid gap-4 md:grid-cols-2 ${plan.platforms.length > 2 ? 'xl:grid-cols-4' : ''}` : undefined}>
                               {plan.platforms.includes('facebook') && (
                                 <FacebookPostPreview
                                   pageName={pg?.location_name || row.location_name || row.location_number}
@@ -1609,6 +1814,24 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                                   mediaUrl={ig.url}
                                   aspectRatio={ig.ratio}
                                   note={ig.note}
+                                />
+                              )}
+                              {plan.platforms.includes('linkedin') && (
+                                <LinkedInPostPreview
+                                  orgName={pg?.linkedin_org_name || pg?.location_name || row.location_name || row.location_number}
+                                  content={plan.liText}
+                                  linkUrl={!kind ? replacePlaceholders(row.link_url, vals) || null : null}
+                                  mediaType={kind}
+                                  mediaUrl={previewMedia}
+                                />
+                              )}
+                              {plan.platforms.includes('x') && (
+                                <XPostPreview
+                                  displayName={pg?.location_name || row.location_name || row.location_number}
+                                  username={pg?.x_username}
+                                  content={plan.xText}
+                                  mediaType={kind}
+                                  mediaUrl={previewMedia}
                                 />
                               )}
                             </div>
@@ -1744,10 +1967,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                 <ul className="text-sm text-gray-600 space-y-1">
                   <li>• <strong>location_number</strong> (optional): Location number to match - takes priority over location_name</li>
                   <li>• <strong>location_name</strong> (optional): Location name - used if location_number not provided</li>
-                  <li>• <strong>platforms</strong> (optional): <code>fb</code>, <code>ig</code> or <code>fb,ig</code> (facebook/instagram also work). Blank = Facebook only. <code>fb,ig</code> creates two linked posts that are reviewed side by side</li>
+                  <li>• <strong>platforms</strong> (optional): any of <code>fb</code>, <code>ig</code>, <code>li</code> (LinkedIn), <code>x</code>, e.g. <code>fb,ig,li,x</code> (facebook/instagram/linkedin/twitter also work). Blank = Facebook only. Several platforms create linked posts that are reviewed side by side</li>
                   <li>• <strong>post_content</strong> (required): The text content of your post</li>
                   <li>• <strong>ig_caption</strong> (optional): Instagram caption; blank uses post_content (placeholders work in both). Max 2,200 characters and 30 hashtags</li>
-                  <li>• <strong>link_url</strong> (optional): URL to include with text posts (ignored for photo/video)</li>
+                  <li>• <strong>linkedin_text</strong> (optional): LinkedIn text; blank uses post_content. Max 3,000 characters</li>
+                  <li>• <strong>x_text</strong> (optional): X text; blank uses post_content. Max 280 characters, each link counts as 23</li>
+                  <li>• <strong>link_url</strong> (optional): URL to include with text posts (ignored for photo/video). Facebook shows a link card and LinkedIn an article card; X never uses it (put the URL in x_text)</li>
                   <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
                   <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;. With media_file it can be left blank (detected from the file)</li>
                   <li>• <strong>media_file</strong> (optional): File name of an image/video you upload together with the CSV (e.g. example-photo.jpg). Matching ignores upper/lower case and folders; without an extension it matches the file name before the dot. Several rows can share one file</li>
@@ -1765,6 +1990,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   Photos are converted to JPEG (max 1440 px wide) and center-cropped to 4:5–1.91:1 when needed; the Facebook post keeps the
                   original. Videos: MP4/MOV, 3 s to 15 min, 9:16 recommended. Links in captions are not clickable; more than 5 hashtags gets a warning.
                   {!igEnabled && ' Instagram publishing is not enabled yet: Instagram posts go through client approval but are held back when the batch is scheduled.'}
+                </p>
+                <p className="text-sm text-gray-500 mt-1">
+                  LinkedIn and X: the page needs a LinkedIn company page / X account set on the Pages tab. Both use the original photo or video
+                  (LinkedIn: JPG/PNG/GIF or MP4; X: JPG/PNG/GIF/WEBP up to 5 MB or MP4). X posts with a link cost more (about $0.20 vs $0.015).
+                  {bulkSocialOff.length > 0 && ` ${bulkSocialOff.map((sp) => PLATFORM_LABEL[sp]).join(' and ')} publishing is not enabled yet: those posts go through client approval but are held back when the batch is scheduled.`}
                 </p>
                 <p className="text-sm text-gray-500 mt-1">
                   Non-franchise pages (e.g. IANA): leave location_number blank and enter the page name exactly as it appears on the Pages tab.
