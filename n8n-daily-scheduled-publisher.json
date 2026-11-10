@@ -41,6 +41,10 @@
             {
               "name": "scheduled_for",
               "value": "not.is.null"
+            },
+            {
+              "name": "platform",
+              "value": "eq.facebook"
             }
           ]
         },
