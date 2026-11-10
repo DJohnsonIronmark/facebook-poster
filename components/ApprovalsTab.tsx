@@ -5,6 +5,7 @@ import FacebookPostPreview from './FacebookPostPreview';
 import InstagramPostPreview from './InstagramPostPreview';
 import PlatformBadge from './PlatformBadge';
 import IgCaptionMeter from './IgCaptionMeter';
+import ReplaceMediaButton from './ReplaceMediaButton';
 import DeviceToggle from './DeviceToggle';
 import ClientSettings from './ClientSettings';
 import type { ReviewBatch, ReviewPost } from '@/lib/review/types';
@@ -557,6 +558,9 @@ function PostReviewCard({ post, device, editable, onChanged }: {
               ) : (
                 <>
                   <button onClick={() => setConfirmRemove(true)} className="px-3 py-1 rounded-lg text-red-700 hover:bg-red-50">Remove</button>
+                  {(post.media_type === 'photo' || post.media_type === 'video') && (
+                    <ReplaceMediaButton postId={post.id} platform={post.platform} mediaType={post.media_type} onReplaced={onChanged} />
+                  )}
                   <button onClick={() => setEditing(true)} className="px-3 py-1 rounded-lg bg-gray-100 text-gray-800 hover:bg-gray-200">Edit</button>
                 </>
               )}
