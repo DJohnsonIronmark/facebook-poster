@@ -14,7 +14,10 @@
       },
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [0, 300],
+      "position": [
+        0,
+        300
+      ],
       "id": "schedule-trigger",
       "name": "Daily at 6 AM"
     },
@@ -38,6 +41,10 @@
             {
               "name": "scheduled_for",
               "value": "not.is.null"
+            },
+            {
+              "name": "platform",
+              "value": "eq.facebook"
             }
           ]
         },
@@ -45,7 +52,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [220, 300],
+      "position": [
+        220,
+        300
+      ],
       "id": "fetch-scheduled-posts",
       "name": "Fetch Scheduled Posts",
       "credentials": {
@@ -80,7 +90,10 @@
       },
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.2,
-      "position": [440, 300],
+      "position": [
+        440,
+        300
+      ],
       "id": "filter-due-posts",
       "name": "Filter Posts Due Now"
     },
@@ -90,7 +103,10 @@
       },
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
-      "position": [660, 300],
+      "position": [
+        660,
+        300
+      ],
       "id": "loop-over-posts",
       "name": "Loop Over Posts"
     },
@@ -177,7 +193,10 @@
       },
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.4,
-      "position": [880, 300],
+      "position": [
+        880,
+        300
+      ],
       "id": "media-type-switch",
       "name": "Media Type Switch"
     },
@@ -199,7 +218,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1100, 100],
+      "position": [
+        1100,
+        100
+      ],
       "id": "get-token-photo",
       "name": "Get Token (Photo)",
       "credentials": {
@@ -228,7 +250,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1100, 300],
+      "position": [
+        1100,
+        300
+      ],
       "id": "get-token-video",
       "name": "Get Token (Video)",
       "credentials": {
@@ -257,7 +282,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1100, 500],
+      "position": [
+        1100,
+        500
+      ],
       "id": "get-token-text",
       "name": "Get Token (Text)",
       "credentials": {
@@ -302,9 +330,13 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1320, 100],
+      "position": [
+        1320,
+        100
+      ],
       "id": "publish-photo",
-      "name": "Publish Photo"
+      "name": "Publish Photo",
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -340,9 +372,13 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1320, 300],
+      "position": [
+        1320,
+        300
+      ],
       "id": "publish-video",
-      "name": "Publish Video"
+      "name": "Publish Video",
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -358,29 +394,19 @@
           ]
         },
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "message",
-              "value": "={{ $('Loop Over Posts').item.json.post_content }}"
-            },
-            {
-              "name": "link",
-              "value": "={{ $('Loop Over Posts').item.json.link_url }}"
-            },
-            {
-              "name": "published",
-              "value": "true"
-            }
-          ]
-        },
-        "options": {}
+        "options": {},
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $('Loop Over Posts').item.json.post_content, link: $('Loop Over Posts').item.json.link_url || undefined, published: true }) }}"
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1320, 500],
+      "position": [
+        1320,
+        500
+      ],
       "id": "publish-text",
-      "name": "Publish Text/Link"
+      "name": "Publish Text/Link",
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -395,7 +421,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1540, 100],
+      "position": [
+        1540,
+        100
+      ],
       "id": "update-status-photo",
       "name": "Update Status (Photo)",
       "credentials": {
@@ -418,7 +447,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1540, 300],
+      "position": [
+        1540,
+        300
+      ],
       "id": "update-status-video",
       "name": "Update Status (Video)",
       "credentials": {
@@ -441,9 +473,38 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [1540, 500],
+      "position": [
+        1540,
+        500
+      ],
       "id": "update-status-text",
       "name": "Update Status (Text)",
+      "credentials": {
+        "supabaseApi": {
+          "id": "9wxMVkfSJBYoL43Q",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://xhyttombqrhqvnycyzlj.supabase.co/rest/v1/facebook_scheduled_posts?id=eq.{{ $('Loop Over Posts').item.json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"status\": \"failed\" }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1540,
+        700
+      ],
+      "id": "5b0c2f3e-8d41-4a7e-9c55-2f6a1e9d7b10",
+      "name": "Mark Failed",
       "credentials": {
         "supabaseApi": {
           "id": "9wxMVkfSJBYoL43Q",
@@ -564,6 +625,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Mark Failed",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -575,6 +643,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Mark Failed",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -583,6 +658,13 @@
         [
           {
             "node": "Update Status (Text)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Failed",
             "type": "main",
             "index": 0
           }
@@ -612,6 +694,17 @@
       ]
     },
     "Update Status (Text)": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Failed": {
       "main": [
         [
           {

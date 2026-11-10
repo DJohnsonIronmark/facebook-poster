@@ -1,73 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
+import { createServiceClient } from '@/lib/supabase/server';
+import { replacePlaceholders } from '@/lib/placeholders';
+import { UUID_RE, pageRequiresApproval } from '@/lib/review/guards';
+import { isScheduledForToday, normalizeMediaType } from '@/lib/publisher';
+import { instagramPublishConstraints, normalizeIncomingMediaUrl, publishDraftMedia, signPostMedia } from '@/lib/media/server';
+import { normalizePlatform } from '@/lib/instagram/rules';
+import { directPostDecision } from '@/lib/instagram/release';
+import { instagramPublishingEnabled, instagramRowProblem } from '@/lib/instagram/server';
+import { linkedinPublishingEnabled, xPublishingEnabled } from '@/lib/social/switches';
+import {
+  attachSocialIdentities, isSocialPlatform, loadConnectionsLite, loadPageMappings, pageSocialProblem, pickMappingFor,
+  socialMediaUrlProblem, socialPublishConstraints, socialTextProblem,
+} from '@/lib/social/server';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+// Direct (non-approval) scheduling path. All data access is server-side via the service role.
+// n8n "Facebook Daily Scheduled Publisher" publishes rows with status='pending' once scheduled_for
+// has passed (daily 6 AM run); same-day posts and "publish now" go straight to the n8n webhook.
+// LinkedIn / X rows are stored 'pending' (only while their switch is on) for the app's social
+// runner (/api/publish/social-run); they never go to the webhook and can't be published now.
+
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
-
-// Replace placeholders in text with actual values
-function replacePlaceholders(text: string, values: Record<string, string>): string {
-  if (!text) return text;
-
-  let result = text;
-  const placeholders: Record<string, string> = {
-    '{{CITY}}': values.city || '',
-    '{{FRANCHISENAME}}': values.franchise_name || '',
-    '{{LOCATION}}': values.location_number || '',
-    '{{BASEURL}}': values.base_url || '',
-    '{{PHONE}}': values.phone || '',
-  };
-
-  for (const [placeholder, value] of Object.entries(placeholders)) {
-    result = result.replace(new RegExp(placeholder, 'gi'), value);
-  }
-
-  // Fix URL duplication patterns (e.g., https://www.homeinsteadhttps://www.homeinstead.com/...)
-  // This handles cases where user types partial URL before {{BASEURL}} placeholder
-  result = result.replace(
-    /https?:\/\/[a-zA-Z0-9.-]*(https?:\/\/)/gi,
-    '$1'
-  );
-
-  return result;
-}
 
 // GET - Fetch all posts
 export async function GET() {
   const { error: authError } = await requireAuth();
   if (authError) return authError;
 
-  try {
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/facebook_scheduled_posts?select=*&order=created_at.desc`,
-      {
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        cache: 'no-store',
-      }
-    );
-
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('Supabase error:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch posts', details: error },
-        { status: response.status }
-      );
-    }
-
-    const posts = await response.json();
-    return NextResponse.json({ posts });
-  } catch (error) {
-    console.error('Error fetching posts:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const supabase = createServiceClient();
+  const { data, error } = await supabase
+    .from('facebook_scheduled_posts')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) {
+    console.error('posts GET', error);
+    return NextResponse.json({ error: 'Failed to fetch posts' }, { status: 500 });
   }
+  // Review-workflow posts still hold private draft media until scheduled
+  await signPostMedia(supabase, data || []);
+  await attachSocialIdentities(supabase, data || []);
+  return NextResponse.json({ posts: data });
 }
 
 // POST - Create a new post
@@ -77,29 +49,32 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const {
-      facebook_page_id,
-      franchise_name,
-      post_content,
-      link_url,
-      scheduled_for,
-      publish_now,
-      media_url,
-      media_type,
-      city,
-      base_url,
-      phone,
-    } = body;
+    const { facebook_page_id, franchise_name, post_content, link_url, scheduled_for, publish_now, media_url, city, base_url, phone } = body;
 
-    // Validate required fields
     if (!facebook_page_id || !post_content) {
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+    }
+
+    // Approval workflow is enforced server-side, not just in the form
+    if (await pageRequiresApproval(String(facebook_page_id))) {
       return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
+        { error: "This page's client requires approval. Submit it as a draft through the approval workflow." },
+        { status: 409 }
       );
     }
 
-    // Prepare placeholder values
+    // Instagram / LinkedIn / X: refused while that platform's switch is off; never "publish now";
+    // never the Facebook webhook (lib/instagram/release.ts)
+    const platform = normalizePlatform(body.platform);
+    if (!platform) return NextResponse.json({ error: 'platform must be facebook, instagram, linkedin or x' }, { status: 400 });
+    const decision = directPostDecision({
+      platform, publishNow: !!publish_now, instagramEnabled: instagramPublishingEnabled(),
+      linkedinEnabled: linkedinPublishingEnabled(), xEnabled: xPublishingEnabled(),
+    });
+    if (!decision.ok) return NextResponse.json({ error: decision.error }, { status: decision.status });
+    const postGroupId = body.post_group_id ? String(body.post_group_id) : null;
+    if (postGroupId && !UUID_RE.test(postGroupId)) return NextResponse.json({ error: 'Invalid post_group_id' }, { status: 400 });
+
     const placeholderValues = {
       city: city || '',
       franchise_name: franchise_name || '',
@@ -107,178 +82,121 @@ export async function POST(request: NextRequest) {
       base_url: base_url || '',
       phone: phone || '',
     };
-
-    // Replace placeholders in content and link
+    const mediaType = normalizeMediaType(body.media_type);
     const processedContent = replacePlaceholders(post_content, placeholderValues);
-    const processedLinkUrl = replacePlaceholders(link_url || '', placeholderValues);
+    // Instagram has no link cards; X keeps links in the text itself
+    const processedLinkUrl = mediaType || platform === 'instagram' || platform === 'x' ? '' : replacePlaceholders(link_url || '', placeholderValues);
 
-    // Check if scheduled_for is today (same-day scheduling goes through webhook)
-    const isScheduledForToday = () => {
-      if (!scheduled_for) return false;
-      const scheduledDate = new Date(scheduled_for);
-      const today = new Date();
-      return (
-        scheduledDate.getFullYear() === today.getFullYear() &&
-        scheduledDate.getMonth() === today.getMonth() &&
-        scheduledDate.getDate() === today.getDate()
-      );
-    };
+    let scheduledIso: string | null = null;
+    if (scheduled_for && !publish_now) {
+      const d = new Date(scheduled_for);
+      if (isNaN(d.getTime())) return NextResponse.json({ error: 'Invalid schedule date' }, { status: 400 });
+      scheduledIso = d.toISOString();
+    }
+    if (platform !== 'facebook' && !scheduledIso) {
+      const label = platform === 'instagram' ? 'Instagram' : platform === 'linkedin' ? 'LinkedIn' : 'X';
+      return NextResponse.json({ error: `${label} posts need a schedule date` }, { status: 400 });
+    }
+    const viaWebhook = decision.useWebhookIfSameDay && (!!publish_now || isScheduledForToday(scheduledIso));
+    if (viaWebhook && !N8N_WEBHOOK_URL) {
+      return NextResponse.json({ error: 'n8n webhook URL not configured' }, { status: 500 });
+    }
 
-    // If publish_now is true OR scheduled for today, trigger n8n webhook directly
-    if (publish_now || isScheduledForToday()) {
-      if (!N8N_WEBHOOK_URL) {
-        return NextResponse.json(
-          { error: 'n8n webhook URL not configured' },
-          { status: 500 }
-        );
-      }
+    // Direct posts schedule immediately, so uploaded (private) media is copied to the public
+    // bucket now: n8n/Facebook fetch media_url unauthenticated once the row is 'pending'.
+    const supabase = createServiceClient();
+    const incoming = normalizeIncomingMediaUrl(media_url);
+    if (mediaType && !incoming.ok) return NextResponse.json({ error: 'Invalid media_url' }, { status: 400 });
+    if (platform === 'instagram') {
+      const { data: igPages } = await supabase
+        .from('facebook_pages').select('ig_user_id').eq('facebook_page_id', String(facebook_page_id));
+      const igUserId = (igPages || []).map((p: { ig_user_id: string | null }) => p.ig_user_id).find(Boolean) || null;
+      const problem = instagramRowProblem({
+        caption: processedContent, mediaType, mediaUrl: incoming.ok ? incoming.value : null, igUserId,
+      });
+      if (problem) return NextResponse.json({ error: `Instagram: ${problem}` }, { status: 400 });
+    }
+    if (isSocialPlatform(platform)) {
+      const label = platform === 'x' ? 'X' : 'LinkedIn';
+      const mediaValue = mediaType && incoming.ok ? incoming.value : null;
+      const mappings = await loadPageMappings(supabase, [String(facebook_page_id)]);
+      const page = pickMappingFor(platform, mappings.get(String(facebook_page_id)));
+      if (!page) return NextResponse.json({ error: `${label}: page not found` }, { status: 400 });
+      const connections = await loadConnectionsLite(supabase, [page.linkedin_connection_id, page.x_connection_id]);
+      const problem = pageSocialProblem(platform, page, connections)
+        || socialMediaUrlProblem(platform, mediaType, mediaValue)
+        || socialTextProblem(platform, processedContent, { hasMedia: !!mediaValue, hasLink: !!processedLinkUrl });
+      if (problem) return NextResponse.json({ error: `${label}: ${problem}` }, { status: 400 });
+    }
+    let publicMediaUrl: string | null = null;
+    if (mediaType && incoming.ok) {
+      const constraints = platform === 'instagram' ? instagramPublishConstraints(mediaType)
+        : isSocialPlatform(platform) ? socialPublishConstraints(platform, mediaType) : {};
+      const published = await publishDraftMedia(supabase, incoming.value, mediaType, constraints);
+      if (!published.ok) return NextResponse.json({ error: `Media not published: ${published.error}` }, { status: 400 });
+      publicMediaUrl = published.url;
+    }
 
-      // Save to Supabase FIRST to get the post ID
-      const postData = {
+    // Save first to get the post ID
+    const { data: saved, error: insertErr } = await supabase
+      .from('facebook_scheduled_posts')
+      .insert({
         facebook_page_id,
         franchise_name,
         location_number: body.location_number || null,
         post_content: processedContent,
         link_url: processedLinkUrl || null,
-        scheduled_for: scheduled_for || null,
+        scheduled_for: scheduledIso,
         status: publish_now ? 'published' : 'pending',
         published_at: publish_now ? new Date().toISOString() : null,
-        media_url: media_url || null,
-        media_type: media_type || null,
-      };
-
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/facebook_scheduled_posts`,
-        {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation',
-          },
-          body: JSON.stringify(postData),
-        }
-      );
-
-      if (!response.ok) {
-        const error = await response.text();
-        console.error('Supabase error:', error);
-        return NextResponse.json(
-          { error: 'Failed to save post to database', details: error },
-          { status: 500 }
-        );
-      }
-
-      const savedPost = await response.json();
-      const postId = savedPost[0].id;
-
-      // Convert scheduled_for to UNIX timestamp (seconds) for Facebook API
-      const getUnixTimestamp = (): string => {
-        if (publish_now || !scheduled_for) return '';
-        const date = new Date(scheduled_for);
-        return Math.floor(date.getTime() / 1000).toString();
-      };
-
-      // Trigger n8n webhook for immediate or same-day publishing
-      const webhookPayload = {
-        Facebook_Page_ID: facebook_page_id,
-        FRANCHISENAME: franchise_name,
-        Location_Number: body.location_number || '',
-        Post_Content: processedContent,
-        Link_URL: processedLinkUrl,
-        Scheduled_Publish_Time: getUnixTimestamp(),
-        Publish_Immediately: publish_now ? 'true' : 'false',
-        Media_URL: media_url || '',
-        Media_Type: media_type || '',
-        Post_ID: postId,  // Internal post ID for updating facebook_post_id after publish
-      };
-
-      const webhookResponse = await fetch(N8N_WEBHOOK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(webhookPayload),
-      });
-
-      if (!webhookResponse.ok) {
-        const error = await webhookResponse.text();
-        console.error('n8n webhook error:', error);
-        // Update post status to failed since webhook failed
-        await fetch(
-          `${SUPABASE_URL}/rest/v1/facebook_scheduled_posts?id=eq.${postId}`,
-          {
-            method: 'PATCH',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${SUPABASE_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ status: 'failed' }),
-          }
-        );
-        return NextResponse.json(
-          { error: 'Failed to publish post', details: error },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json({
-        success: true,
-        message: publish_now
-          ? 'Post published successfully'
-          : `Post scheduled for today and sent to publisher`,
-        post: savedPost[0],
-      });
+        media_url: publicMediaUrl,
+        media_type: mediaType,
+        platform,
+        post_group_id: postGroupId,
+      })
+      .select('*')
+      .single();
+    if (insertErr || !saved) {
+      console.error('posts POST insert', insertErr);
+      return NextResponse.json({ error: 'Failed to save post' }, { status: 500 });
     }
 
-    // Save as scheduled post
-    const postData = {
-      facebook_page_id,
-      franchise_name,
-      location_number: body.location_number || null,
-      post_content: processedContent,
-      link_url: processedLinkUrl || null,
-      scheduled_for: scheduled_for || null,
-      status: 'pending',
-      media_url: media_url || null,
-      media_type: media_type || null,
+    if (!viaWebhook) {
+      return NextResponse.json({ success: true, message: 'Post scheduled successfully', post: saved });
+    }
+
+    // Publish now / same-day: hand to the n8n webhook
+    const webhookPayload = {
+      Facebook_Page_ID: facebook_page_id,
+      FRANCHISENAME: franchise_name,
+      Location_Number: body.location_number || '',
+      Post_Content: processedContent,
+      Link_URL: processedLinkUrl,
+      Scheduled_Publish_Time: publish_now || !scheduledIso ? '' : Math.floor(new Date(scheduledIso).getTime() / 1000).toString(),
+      Publish_Immediately: publish_now ? 'true' : 'false',
+      Media_URL: saved.media_url || '',
+      Media_Type: mediaType || '',
+      Post_ID: saved.id, // internal post ID for updating facebook_post_id after publish
     };
-
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/facebook_scheduled_posts`,
-      {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=representation',
-        },
-        body: JSON.stringify(postData),
-      }
-    );
-
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('Supabase error:', error);
-      return NextResponse.json(
-        { error: 'Failed to save post', details: error },
-        { status: response.status }
-      );
+    const webhookResponse = await fetch(N8N_WEBHOOK_URL!, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(webhookPayload),
+    });
+    if (!webhookResponse.ok) {
+      console.error('n8n webhook error:', await webhookResponse.text());
+      await supabase.from('facebook_scheduled_posts').update({ status: 'failed' }).eq('id', saved.id);
+      return NextResponse.json({ error: 'Failed to publish post' }, { status: 500 });
     }
 
-    const savedPost = await response.json();
     return NextResponse.json({
       success: true,
-      message: 'Post scheduled successfully',
-      post: savedPost[0],
+      message: publish_now ? 'Post published successfully' : 'Post scheduled for today and sent to publisher',
+      post: saved,
     });
   } catch (error) {
     console.error('Error creating post:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
@@ -287,44 +205,16 @@ export async function DELETE(request: NextRequest) {
   const { error: authError } = await requireAuth();
   if (authError) return authError;
 
-  try {
-    const { searchParams } = new URL(request.url);
-    const postId = searchParams.get('id');
-
-    if (!postId) {
-      return NextResponse.json(
-        { error: 'Post ID is required' },
-        { status: 400 }
-      );
-    }
-
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/facebook_scheduled_posts?id=eq.${postId}`,
-      {
-        method: 'DELETE',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('Supabase error:', error);
-      return NextResponse.json(
-        { error: 'Failed to delete post', details: error },
-        { status: response.status }
-      );
-    }
-
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error('Error deleting post:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const postId = new URL(request.url).searchParams.get('id');
+  if (!postId || !UUID_RE.test(postId)) {
+    return NextResponse.json({ error: 'Valid post ID is required' }, { status: 400 });
   }
+
+  const supabase = createServiceClient();
+  const { error } = await supabase.from('facebook_scheduled_posts').delete().eq('id', postId);
+  if (error) {
+    console.error('posts DELETE', error);
+    return NextResponse.json({ error: 'Failed to delete post' }, { status: 500 });
+  }
+  return NextResponse.json({ success: true });
 }

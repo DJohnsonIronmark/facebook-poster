@@ -1,0 +1,68 @@
+{
+  "name": "facebook-poster LinkedIn/X Social Runner Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "10 * * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -200,
+        300
+      ],
+      "id": "6f1c2a4e-7d3b-4c8e-9a51-2b0e8d4f7c10",
+      "name": "Hourly at :10"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://REPLACE_WITH_APP_BASE_URL/api/publish/social-run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 310000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        300
+      ],
+      "id": "a3d9e5b2-1c4f-4e7a-8b6d-5f2c9e1a0b34",
+      "name": "Run social publisher",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "facebook-poster social runner"
+        }
+      },
+      "notes": "Header Auth credential named \"facebook-poster social runner\": Name = Authorization, Value = Bearer <SOCIAL_PUBLISH_CRON_SECRET>. Replace the URL host with APP_BASE_URL. The app only publishes LinkedIn/X rows while LINKEDIN_PUBLISHING_ENABLED / X_PUBLISHING_ENABLED are on."
+    }
+  ],
+  "connections": {
+    "Hourly at :10": {
+      "main": [
+        [
+          {
+            "node": "Run social publisher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

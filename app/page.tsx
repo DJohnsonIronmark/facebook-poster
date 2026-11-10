@@ -5,7 +5,10 @@ import { useRouter } from 'next/navigation';
 import PostForm from '@/components/PostForm';
 import PostList from '@/components/PostList';
 import PostFilters, { FilterState } from '@/components/PostFilters';
+import ApprovalsTab from '@/components/ApprovalsTab';
+import PagesManager from '@/components/PagesManager';
 import { createClient } from '@/lib/supabase/client';
+import { useAuth } from '@/context/AuthContext';
 
 export interface FacebookPage {
   id: string;
@@ -15,6 +18,14 @@ export interface FacebookPage {
   city: string | null;
   base_url: string | null;
   phone: string | null;
+  client_id?: string | null;
+  ig_user_id?: string | null;   // linked Instagram business account (required for Instagram posts)
+  ig_username?: string | null;
+  linkedin_org_id?: string | null;        // LinkedIn company page (required for LinkedIn posts)
+  linkedin_org_name?: string | null;
+  linkedin_connection_id?: string | null; // connected LinkedIn admin used to post for this page
+  x_connection_id?: string | null;        // connected X account (required for X posts)
+  x_username?: string | null;
 }
 
 export interface ScheduledPost {
@@ -25,20 +36,33 @@ export interface ScheduledPost {
   post_content: string;
   link_url: string;
   scheduled_for: string | null;
-  status: 'pending' | 'published' | 'failed';
+  status: 'pending' | 'publishing' | 'published' | 'failed' | 'internal_review' | 'client_review' | 'client_approved';
   created_at: string;
   published_at: string | null;
   facebook_post_id: string | null;
+  platform?: 'facebook' | 'instagram' | 'linkedin' | 'x' | null;
+  post_group_id?: string | null;
+  platform_post_id?: string | null;   // LinkedIn post URN / X post id once published
+  publish_error?: string | null;      // last LinkedIn / X publishing failure
+  linkedin_org_name?: string | null;
+  x_username?: string | null;
 }
 
 export default function Home() {
   const [pages, setPages] = useState<FacebookPage[]>([]);
   const [posts, setPosts] = useState<ScheduledPost[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'create' | 'scheduled' | 'published'>('create');
+  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'pages'>('create');
   const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
   const router = useRouter();
   const supabase = createClient();
+  const { role, user } = useAuth();
+
+  // Deep link from notification emails: /?tab=approvals
+  useEffect(() => {
+    const tab = new URLSearchParams(window.location.search).get('tab');
+    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published' || tab === 'pages') setActiveTab(tab);
+  }, []);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -77,9 +101,9 @@ export default function Home() {
     fetchPosts();
   }, [fetchPages, fetchPosts]);
 
-  const handlePostCreated = () => {
+  const handlePostCreated = (destination: 'scheduled' | 'approvals' = 'scheduled') => {
     fetchPosts();
-    setActiveTab('scheduled');
+    setActiveTab(destination);
   };
 
   const handlePostDeleted = (postId: string) => {
@@ -92,9 +116,11 @@ export default function Home() {
     ));
   };
 
-  const pendingPosts = posts.filter(p => p.status === 'pending');
+  // Scheduled tab: waiting posts, LinkedIn/X posts the runner is posting right now, and LinkedIn/X
+  // posts whose publishing failed (their error is shown; Facebook failures are handled in n8n)
+  const pendingPosts = posts.filter(p => p.status === 'pending' || p.status === 'publishing'
+    || (p.status === 'failed' && (p.platform === 'linkedin' || p.platform === 'x')));
   const publishedPosts = posts.filter(p => p.status === 'published');
-
   // Apply filters to published posts
   const filteredPublishedPosts = useMemo(() => {
     return publishedPosts.filter(post => {
@@ -172,6 +198,16 @@ export default function Home() {
               Create Post
             </button>
             <button
+              onClick={() => setActiveTab('approvals')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'approvals'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Approvals
+            </button>
+            <button
               onClick={() => setActiveTab('scheduled')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'scheduled'
@@ -191,6 +227,18 @@ export default function Home() {
             >
               Published ({publishedPosts.length})
             </button>
+            {(role === 'admin' || role === 'manager') && (
+              <button
+                onClick={() => setActiveTab('pages')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'pages'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Pages ({pages.length})
+              </button>
+            )}
           </nav>
         </div>
       </div>
@@ -199,6 +247,17 @@ export default function Home() {
       <main className="max-w-5xl mx-auto px-4 py-8">
         {activeTab === 'create' && (
           <PostForm pages={pages} onPostCreated={handlePostCreated} />
+        )}
+        {activeTab === 'pages' && (role === 'admin' || role === 'manager') && (
+          <PagesManager onPagesChanged={fetchPages} />
+        )}
+        {activeTab === 'approvals' && (
+          <ApprovalsTab
+            canEdit={role === 'admin' || role === 'manager'}
+            isAdmin={role === 'admin'}
+            userEmail={user?.email ?? null}
+            onScheduled={fetchPosts}
+          />
         )}
         {activeTab === 'scheduled' && (
           <PostList

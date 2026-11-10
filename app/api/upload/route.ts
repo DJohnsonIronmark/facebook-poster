@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
+import { createServiceClient } from '@/lib/supabase/server';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
 export async function POST(request: NextRequest) {
   const { error: authError } = await requireAuth();
@@ -61,27 +61,16 @@ export async function POST(request: NextRequest) {
     // Convert file to ArrayBuffer
     const arrayBuffer = await file.arrayBuffer();
 
-    // Upload to Supabase Storage
-    const uploadResponse = await fetch(
-      `${SUPABASE_URL}/storage/v1/object/facebook-media/${filePath}`,
-      {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': file.type,
-        },
-        body: arrayBuffer,
-      }
-    );
+    // Upload to Supabase Storage (service role, server-side). The bucket is public because
+    // Facebook must fetch the media URL unauthenticated when the post publishes.
+    const supabase = createServiceClient();
+    const { error: uploadError } = await supabase.storage
+      .from('facebook-media')
+      .upload(filePath, arrayBuffer, { contentType: file.type, upsert: false });
 
-    if (!uploadResponse.ok) {
-      const error = await uploadResponse.text();
-      console.error('Supabase Storage error:', error);
-      return NextResponse.json(
-        { error: 'Failed to upload file', details: error },
-        { status: 500 }
-      );
+    if (uploadError) {
+      console.error('Supabase Storage error:', uploadError);
+      return NextResponse.json({ error: 'Failed to upload file' }, { status: 500 });
     }
 
     // Construct the public URL
