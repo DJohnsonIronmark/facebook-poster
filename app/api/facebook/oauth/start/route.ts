@@ -27,7 +27,11 @@ export async function GET(request: NextRequest) {
   dialog.searchParams.set('state', state);
   dialog.searchParams.set('response_type', 'code');
   // Default: list pages only. Inbox: comment/message permissions (see INBOX_SCOPES).
-  dialog.searchParams.set('scope', inbox ? INBOX_SCOPES.join(',') : 'pages_show_list');
+  // Meta "Business" type apps use Facebook Login for Business, which takes a configuration id
+  // (set up in the Meta app with the same permissions) instead of a scope list.
+  const inboxConfigId = (process.env.FACEBOOK_INBOX_CONFIG_ID || '').trim();
+  if (inbox && /^\d{5,25}$/.test(inboxConfigId)) dialog.searchParams.set('config_id', inboxConfigId);
+  else dialog.searchParams.set('scope', inbox ? INBOX_SCOPES.join(',') : 'pages_show_list');
 
   const res = NextResponse.redirect(dialog);
   res.cookies.set(STATE_COOKIE, state, cookieOptions(10 * 60));

@@ -154,6 +154,15 @@ export async function savePageTokens(supabase: SupabaseClient, pages: Connectabl
     const { error } = await supabase.from('fb_page_tokens').upsert(rows, { onConflict: 'facebook_page_id' });
     if (error) throw new Error(`Saving page tokens failed: ${error.message}`);
   }
+  // Fill in the linked Instagram account on the Pages tab where it's blank (never overwrites one set by hand)
+  for (const p of pages) {
+    if (!inApp.has(p.facebook_page_id) || !p.ig_user_id) continue;
+    const { error } = await supabase.from('facebook_pages')
+      .update({ ig_user_id: p.ig_user_id, ig_username: p.ig_username })
+      .eq('facebook_page_id', p.facebook_page_id)
+      .is('ig_user_id', null);
+    if (error) console.error('[inbox] filling ig_user_id failed', error.message);
+  }
   return { saved: rows.length, notInApp: pages.length - rows.length };
 }
 
