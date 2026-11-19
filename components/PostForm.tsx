@@ -33,6 +33,7 @@ interface DraftPayload {
   media_url: string | null;
   platform: Platform;
   post_group_id: string | null;
+  bio_link_url?: string | null;
 }
 
 /** Browser analysis of a media file for Instagram → the shape evaluateInstagramTarget expects */
@@ -86,6 +87,7 @@ interface CSVRow {
   ig_caption: string;
   linkedin_text: string;
   x_text: string;
+  bio_link: string;
 }
 
 interface RowPlan {
@@ -782,6 +784,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             : row.post_content;
           // Facebook and LinkedIn (article) take link_url on text posts; X never does
           const link = (platform === 'facebook' || platform === 'linkedin') && !media.media_type ? (row.link_url || null) : null;
+          // Instagram: where this post's link in bio tile goes (blank = link_url)
+          const bioLink = platform === 'instagram' ? (row.bio_link || row.link_url || null) : null;
 
           // Approval-workflow clients: queue as drafts for internal → client review
           if (needsApproval(page)) {
@@ -794,6 +798,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
               media_url: media.media_url,
               platform,
               post_group_id: groupId,
+              bio_link_url: bioLink,
             });
             continue;
           }
@@ -810,6 +815,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
             media_url: media.media_url,
             platform,
             post_group_id: groupId,
+            bio_link_url: bioLink,
             // Placeholder values
             city: page.city || null,
             base_url: page.base_url || null,
@@ -977,6 +983,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         ig_caption: row.ig_caption || '',
         linkedin_text: row.linkedin_text || '',
         x_text: row.x_text || '',
+        bio_link: row.bio_link || '',
       });
     }
 
@@ -1008,7 +1015,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const downloadTemplate = () => {
     // 'notes' is for people reading the file; the importer ignores columns it doesn't know.
-    const headers = ['location_number', 'location_name', 'platforms', 'post_content', 'ig_caption', 'linkedin_text', 'x_text', 'link_url', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
+    const headers = ['location_number', 'location_name', 'platforms', 'post_content', 'ig_caption', 'linkedin_text', 'x_text', 'link_url', 'bio_link', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
     // One franchise example (matched on location_number) and non-franchise examples (blank
     // location_number, matched on the exact page name). Dates are 95+ days out so a test upload
     // can be reviewed and deleted long before it's due.
@@ -1023,7 +1030,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     // for every row and never creates posts on a real client page. Replace with real pages.
     const EXAMPLE_NOTE = 'EXAMPLE ROW: replace the page with a real one from the Pages tab (or delete this row).';
     // Columns: location_number, location_name, platforms, post_content, ig_caption, linkedin_text, x_text,
-    //          link_url, scheduled_for, media_type, media_file, media_url, notes
+    //          link_url, (bio_link, inserted below), scheduled_for, media_type, media_file, media_url, notes
     const exampleRows = [
       ['0001', 'Example Franchise Location A', 'fb', 'Text + link post for {{CITY}}. Call us at {{PHONE}}.', '', '', '', '{{BASEURL}}', daysOut(95, 9), '', '', '',
         `FRANCHISE LOCATION, text + link: location_number is matched first (name is a fallback). {{CITY}}/{{PHONE}}/{{BASEURL}} fill in from the page. platforms fb (or blank) = Facebook only. ${EXAMPLE_NOTE}`],
@@ -1043,9 +1050,13 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         `X ONLY: platforms x. X never uses link_url: put a URL in x_text if you want one (X charges about $0.20 per post with a link vs $0.015 without). Max 280 characters, links count as 23. ${EXAMPLE_NOTE}`],
     ];
 
+    // bio_link (Instagram link in bio tile) sits right after link_url; only the Instagram examples set it
+    const BIO_LINK_EXAMPLES: Record<string, string> = { '0004': '{{BASEURL}}', '0005': '{{BASEURL}}' };
+    const withBioLink = exampleRows.map((row) => [...row.slice(0, 8), BIO_LINK_EXAMPLES[row[0]] || '', ...row.slice(8)]);
+
     const csv = [
       headers.join(','),
-      ...exampleRows.map(row => row.map(v => `"${v}"`).join(',')),
+      ...withBioLink.map(row => row.map(v => `"${v}"`).join(',')),
     ].join('\n');
 
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -2017,6 +2028,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <li>• <strong>linkedin_text</strong> (optional): LinkedIn text; blank uses post_content. Max 3,000 characters</li>
                   <li>• <strong>x_text</strong> (optional): X text; blank uses post_content. Max 280 characters, each link counts as 23</li>
                   <li>• <strong>link_url</strong> (optional): URL to include with text posts (ignored for photo/video). Facebook shows a link card and LinkedIn an article card; X never uses it (put the URL in x_text)</li>
+                  <li>• <strong>bio_link</strong> (optional): Instagram only. Where this post&apos;s tile on the brand&apos;s link in bio page goes; blank uses link_url. Can also be set later on the Link in bio tab</li>
                   <li>• <strong>scheduled_for</strong> (optional): Date/time in format MM/DD/YYYY HH:MM AM/PM (e.g., 01/20/2025 10:00 AM)</li>
                   <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;. With media_file it can be left blank (detected from the file)</li>
                   <li>• <strong>media_file</strong> (optional): File name of an image/video you upload together with the CSV (e.g. example-photo.jpg). Matching ignores upper/lower case and folders; without an extension it matches the file name before the dot. Several rows can share one file</li>

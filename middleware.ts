@@ -44,7 +44,9 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/login') ||
     request.nextUrl.pathname.startsWith('/auth/callback') ||
     // Client review pages: authenticated by the magic-link token, not a login
-    request.nextUrl.pathname.startsWith('/review/');
+    request.nextUrl.pathname.startsWith('/review/') ||
+    // Instagram link in bio pages: public by design (only published posts of enabled pages)
+    request.nextUrl.pathname.startsWith('/l/');
 
   // If no user and trying to access protected routes, redirect to login
   if (!user && !isPublicRoute) {
