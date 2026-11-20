@@ -101,3 +101,24 @@ export async function requireAuth(): Promise<{
     error: null
   };
 }
+
+/**
+ * Require an authenticated user with one of the given roles in this app.
+ */
+export async function requireRole(allowed: UserRole[]): Promise<{
+  user: { id: string; email: string; role: UserRole } | null;
+  error: Response | null;
+}> {
+  const { user, error } = await requireAuth();
+  if (error || !user) return { user: null, error };
+
+  const role = await getUserRole(user.id);
+  if (!role || !allowed.includes(role)) {
+    const { NextResponse } = await import('next/server');
+    return {
+      user: null,
+      error: NextResponse.json({ error: 'Forbidden: insufficient role' }, { status: 403 }),
+    };
+  }
+  return { user: { ...user, role }, error: null };
+}

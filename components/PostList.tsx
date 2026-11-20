@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import type { ScheduledPost } from '@/app/page';
+import PlatformBadge from './PlatformBadge';
+import { publishedPostUrl } from '@/lib/social/rules';
 
 interface PostListProps {
   posts: ScheduledPost[];
@@ -131,12 +133,25 @@ export default function PostList({
                 <h3 className="font-medium text-gray-900">
                   {post.location_number ? `${post.location_number} - ` : ''}{post.franchise_name}
                 </h3>
-                <p className="text-sm text-gray-500">Page ID: {post.facebook_page_id}</p>
+                <p className="text-sm text-gray-500">
+                  {post.platform === 'linkedin' ? `LinkedIn: ${post.linkedin_org_name || 'company page'}`
+                    : post.platform === 'x' ? `X: ${post.x_username ? `@${post.x_username}` : 'account'}`
+                    : `Page ID: ${post.facebook_page_id}`}
+                </p>
               </div>
               <div className="flex items-center gap-2">
+                <PlatformBadge platform={post.platform} />
                 {post.status === 'published' ? (
                   <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                     Published
+                  </span>
+                ) : post.status === 'publishing' ? (
+                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                    Publishing…
+                  </span>
+                ) : post.status === 'failed' ? (
+                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                    Failed
                   </span>
                 ) : post.scheduled_for ? (
                   <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
@@ -149,6 +164,12 @@ export default function PostList({
                 )}
               </div>
             </div>
+
+            {post.status === 'failed' && post.publish_error && (
+              <div className="bg-red-50 border border-red-200 text-red-800 rounded-lg px-3 py-2 mb-3 text-sm" role="status">
+                <span className="font-medium">Publishing failed:</span> {post.publish_error}
+              </div>
+            )}
 
             {/* Content */}
             <div className="bg-gray-50 rounded-lg p-3 mb-3">
@@ -183,8 +204,18 @@ export default function PostList({
               </div>
 
               <div className="flex items-center gap-2">
-                {/* Preview Link - only for published posts with facebook_post_id */}
-                {post.status === 'published' && post.facebook_post_id && (
+                {/* Published LinkedIn / X posts link to the live post */}
+                {post.status === 'published' && (post.platform === 'linkedin' || post.platform === 'x') && (() => {
+                  const href = publishedPostUrl(post.platform, post.platform_post_id, post.x_username);
+                  return href ? (
+                    <a href={href} target="_blank" rel="noopener noreferrer"
+                      className={`px-3 py-1.5 text-sm rounded-lg ${post.platform === 'x' ? 'bg-gray-900 text-white hover:bg-black' : 'bg-[#0a66c2] text-white hover:bg-[#004182]'}`}>
+                      {post.platform === 'x' ? 'View on X' : 'View on LinkedIn'}
+                    </a>
+                  ) : null;
+                })()}
+                {/* Preview Link - only for published Facebook posts with facebook_post_id */}
+                {post.status === 'published' && post.facebook_post_id && (post.platform || 'facebook') === 'facebook' && (
                   <a
                     href={`https://www.facebook.com/${post.facebook_post_id}`}
                     target="_blank"
@@ -197,7 +228,8 @@ export default function PostList({
                     View on Facebook
                   </a>
                 )}
-                {showPublishButton && (
+                {/* "Publish now" goes through the Facebook webhook; other platforms publish on schedule only */}
+                {showPublishButton && (post.platform || 'facebook') === 'facebook' && post.status === 'pending' && (
                   <button
                     onClick={() => handlePublish(post)}
                     disabled={publishingId === post.id}

@@ -42,7 +42,9 @@ export async function middleware(request: NextRequest) {
   // Public routes that don't require authentication
   const isPublicRoute =
     request.nextUrl.pathname.startsWith('/login') ||
-    request.nextUrl.pathname.startsWith('/auth/callback');
+    request.nextUrl.pathname.startsWith('/auth/callback') ||
+    // Client review pages: authenticated by the magic-link token, not a login
+    request.nextUrl.pathname.startsWith('/review/');
 
   // If no user and trying to access protected routes, redirect to login
   if (!user && !isPublicRoute) {
@@ -64,6 +66,7 @@ export async function middleware(request: NextRequest) {
 // Apply middleware to all routes except static files and api routes
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    // template-media/ holds the CSV template's labeled TEST photo/video; it must be fetchable without login
+    '/((?!_next/static|_next/image|favicon.ico|api/|template-media/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 };
