@@ -48,7 +48,7 @@ function appSecretProof(token: string): string | null {
 
 /** One Graph call. GET params go in the query string; POST params in a form body. */
 export async function graph(
-  path: string, token: string, params: Record<string, string> = {}, method: 'GET' | 'POST' = 'GET',
+  path: string, token: string, params: Record<string, string> = {}, method: 'GET' | 'POST' = 'GET', timeoutMs = 20000,
 ): Promise<any> {
   const url = new URL(`${GRAPH}/${path.replace(/^\//, '')}`);
   const all: Record<string, string> = { ...params, access_token: token };
@@ -57,13 +57,13 @@ export async function graph(
   let res: Response;
   if (method === 'GET') {
     for (const [k, v] of Object.entries(all)) url.searchParams.set(k, v);
-    res = await fetch(url, { signal: AbortSignal.timeout(20000), cache: 'no-store' });
+    res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), cache: 'no-store' });
   } else {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(all).toString(),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(timeoutMs),
       cache: 'no-store',
     });
   }
@@ -102,14 +102,46 @@ export interface ConnectablePage {
   ig_username: string | null;
 }
 
-export async function pagesWithTokens(userToken: string): Promise<ConnectablePage[]> {
+const GRAPH_BATCH_SIZE = 50;     // Graph batch API maximum
+const BATCH_CONCURRENCY = 4;
+const APP_PAGE_ID_RE = /^\d{5,25}$/;
+
+/** Every facebook_page_id on the Pages tab (paged past PostgREST's default 1,000-row limit). */
+async function appPageIds(supabase: SupabaseClient): Promise<string[]> {
+  const ids: string[] = [];
+  const PAGE = 1000;
+  for (let from = 0; from < 100_000; from += PAGE) {
+    const { data, error } = await supabase.from('facebook_pages').select('facebook_page_id').order('facebook_page_id').range(from, from + PAGE - 1);
+    if (error) throw new Error(`Reading pages failed: ${error.message}`);
+    for (const r of data || []) ids.push(String((r as { facebook_page_id: string }).facebook_page_id));
+    if (!data || data.length < PAGE) break;
+  }
+  return Array.from(new Set(ids)).filter((id) => APP_PAGE_ID_RE.test(id));
+}
+
+/**
+ * Page tokens for the pages already on the Pages tab that this Facebook login manages. Asks Graph for
+ * those pages directly (batch API, 50 per request) instead of walking the account's whole page list,
+ * so it is complete however many pages the account has. `unmanaged` = app pages this login can't manage.
+ */
+export async function appPagesWithTokens(supabase: SupabaseClient, userToken: string): Promise<{ pages: ConnectablePage[]; unmanaged: number }> {
+  const ids = await appPageIds(supabase);
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += GRAPH_BATCH_SIZE) chunks.push(ids.slice(i, i + GRAPH_BATCH_SIZE));
+
   const out: ConnectablePage[] = [];
-  let after: string | null = null;
-  for (let i = 0; i < 10; i++) {
-    const params: Record<string, string> = { fields: 'id,name,access_token,instagram_business_account{id,username}', limit: '100' };
-    if (after) params.after = after;
-    const data = await graph('me/accounts', userToken, params);
-    for (const p of data.data || []) {
+  const runChunk = async (chunk: string[]) => {
+    const batch = chunk.map((id) => ({
+      method: 'GET',
+      relative_url: `${id}?fields=id,name,access_token,instagram_business_account{id,username}`,
+    }));
+    const results = await graph('', userToken, { batch: JSON.stringify(batch), include_headers: 'false' }, 'POST', 60_000);
+    if (!Array.isArray(results)) return;
+    for (const r of results) {
+      // Each item is { code, body } (body = JSON string) or null; non-200 = no access to that page
+      if (!r || r.code !== 200 || typeof r.body !== 'string') continue;
+      let p: any;
+      try { p = JSON.parse(r.body); } catch { continue; }
       if (!p?.id || typeof p.access_token !== 'string') continue;
       out.push({
         facebook_page_id: String(p.id),
@@ -119,10 +151,11 @@ export async function pagesWithTokens(userToken: string): Promise<ConnectablePag
         ig_username: p.instagram_business_account?.username ? String(p.instagram_business_account.username) : null,
       });
     }
-    after = data.paging?.next ? data.paging?.cursors?.after || null : null;
-    if (!after) break;
+  };
+  for (let i = 0; i < chunks.length; i += BATCH_CONCURRENCY) {
+    await Promise.all(chunks.slice(i, i + BATCH_CONCURRENCY).map(runChunk));
   }
-  return out;
+  return { pages: out, unmanaged: ids.length - out.length };
 }
 
 export async function grantedScopes(userToken: string): Promise<string[]> {
@@ -131,8 +164,8 @@ export async function grantedScopes(userToken: string): Promise<string[]> {
 }
 
 /**
- * Stores tokens only for pages already on the Pages tab. Returns how many were saved and which
- * managed pages were skipped because they aren't in the app.
+ * Stores tokens only for pages already on the Pages tab (appPagesWithTokens already returns only those;
+ * the filter here is a second guard). notInApp = given pages that aren't on the Pages tab.
  */
 export async function savePageTokens(supabase: SupabaseClient, pages: ConnectablePage[], scopes: string[], email: string): Promise<{ saved: number; notInApp: number }> {
   if (pages.length === 0) return { saved: 0, notInApp: 0 };
