@@ -5,13 +5,19 @@ import { UUID_RE } from '@/lib/review/guards';
 import { TOKEN_COOKIE, cookieOptions } from '@/lib/facebook/oauth';
 import { IG_USER_ID_RE, cleanIgUsername } from '@/lib/instagram/rules';
 import { loadConnectionsLite } from '@/lib/social/server';
+import { facebookAppPublishingEnabled } from '@/lib/social/switches';
+import { publishReadinessFor } from '@/lib/facebook/publish';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-const PAGE_COLUMNS = 'id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, ig_username, client_id, created_at, linkedin_org_id, linkedin_org_name, linkedin_connection_id, x_connection_id';
+const PAGE_COLUMNS = 'id, location_name, location_number, facebook_page_id, city, base_url, phone, ig_user_id, ig_username, client_id, created_at, linkedin_org_id, linkedin_org_name, linkedin_connection_id, x_connection_id, publish_via';
 const LINKEDIN_ORG_ID_RE = /^[0-9]{1,20}$/;
 const SOCIAL_KEYS = ['linkedin_org_id', 'linkedin_org_name', 'linkedin_connection_id', 'x_connection_id'] as const;
 
 interface SocialPageFields {
+  facebook_page_id?: string;
+  fb_publish_ready?: boolean;
+  fb_token_status?: string | null;
+  fb_publish_problem?: string | null;
   linkedin_connection_id?: string | null;
   x_connection_id?: string | null;
   x_username?: string | null;
@@ -28,6 +34,18 @@ async function attachConnectionInfo<T extends SocialPageFields>(supabase: Supaba
     p.linkedin_connection_status = p.linkedin_connection_id ? li?.status ?? 'missing' : null;
     p.x_connection_status = p.x_connection_id ? x?.status ?? 'missing' : null;
     p.x_username = x?.username ?? null;
+  }
+  // Facebook app publishing: is the page connected (stored token with pages_manage_posts)?
+  try {
+    const ready = await publishReadinessFor(supabase, pages.map((p) => String(p.facebook_page_id || '')));
+    for (const p of pages) {
+      const r = ready.get(String(p.facebook_page_id || ''));
+      p.fb_publish_ready = !!r?.ready;
+      p.fb_token_status = r?.token_status ?? null;
+      p.fb_publish_problem = r?.problem ?? null;
+    }
+  } catch (e) {
+    console.error('pages: publish readiness', e instanceof Error ? e.message : e);
   }
   return pages;
 }
@@ -196,12 +214,13 @@ export async function PATCH(request: NextRequest) {
   const body: Record<string, unknown> = await request.json().catch(() => ({}));
   const hasSocial = SOCIAL_KEYS.some((k) => k in body);
   const hasDetails = 'location_name' in body;
-  const { error: authError } = await requireRole(hasSocial ? ['admin'] : ['admin', 'manager']);
+  const hasPublishVia = 'publish_via' in body;
+  const { error: authError } = await requireRole(hasSocial || hasPublishVia ? ['admin'] : ['admin', 'manager']);
   if (authError) return authError;
 
   const id = String(body.id || '');
   if (!UUID_RE.test(id)) return NextResponse.json({ error: 'Valid page id required' }, { status: 400 });
-  if (!hasSocial && !hasDetails) return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
+  if (!hasSocial && !hasDetails && !hasPublishVia) return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
 
   const supabase = createServiceClient();
   const { data: current } = await supabase.from('facebook_pages').select('facebook_page_id').eq('id', id).maybeSingle();
@@ -220,6 +239,19 @@ export async function PATCH(request: NextRequest) {
     const social = await cleanSocialPatch(supabase, body);
     if (typeof social === 'string') return NextResponse.json({ error: social }, { status: 400 });
     Object.assign(update, social);
+  }
+  // Who publishes this page's Facebook posts. Moving to 'app' needs the switch on and a stored page
+  // token with pages_manage_posts; moving back to 'n8n' is always allowed (the safe direction).
+  // A DB trigger moves the page's unpublished posts along with it.
+  if (hasPublishVia) {
+    const v = body.publish_via;
+    if (v !== 'n8n' && v !== 'app') return NextResponse.json({ error: "publish_via must be 'n8n' or 'app'" }, { status: 400 });
+    if (v === 'app') {
+      if (!facebookAppPublishingEnabled()) return NextResponse.json({ error: 'App publishing is turned off (FACEBOOK_APP_PUBLISHING_ENABLED)' }, { status: 409 });
+      const ready = (await publishReadinessFor(supabase, [String(current.facebook_page_id)])).get(String(current.facebook_page_id));
+      if (!ready?.ready) return NextResponse.json({ error: ready?.problem || 'Page is not connected for app publishing' }, { status: 409 });
+    }
+    update.publish_via = v;
   }
   if (Object.keys(update).length === 0) return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
 

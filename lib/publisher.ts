@@ -12,6 +12,7 @@ export function isScheduledForToday(scheduledFor: string | null | undefined): bo
 export async function sendScheduledPostToWebhook(post: {
   id: string;
   platform?: string | null;
+  publish_via?: string | null;
   facebook_page_id: string;
   franchise_name: string;
   location_number: string | null;
@@ -25,6 +26,10 @@ export async function sendScheduledPostToWebhook(post: {
   // than imported so this module stays import-free for the Node test scripts).
   if (post.platform && post.platform !== 'facebook') {
     return { ok: false, error: `${post.platform} posts are never sent to the Facebook publisher` };
+  }
+  // Pages set to app publishing are published by the app runner with the page's own token
+  if (post.publish_via === 'app') {
+    return { ok: false, error: 'This page publishes from the app, not n8n' };
   }
   const url = process.env.N8N_WEBHOOK_URL;
   if (!url) return { ok: false, error: 'n8n webhook URL not configured' };

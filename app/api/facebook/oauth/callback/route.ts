@@ -4,7 +4,8 @@ import {
   STATE_COOKIE, TOKEN_COOKIE, TOKEN_TTL_SECONDS, cookieOptions, exchangeCode, facebookConfigured, sealToken, statesMatch,
 } from '@/lib/facebook/oauth';
 import { createServiceClient } from '@/lib/supabase/server';
-import { appPagesWithTokens, grantedScopes, inboxEnabled, longLivedUserToken, savePageTokens } from '@/lib/inbox/server';
+import { appPagesWithTokens, grantedScopes, longLivedUserToken, savePageTokens } from '@/lib/inbox/server';
+import { pageConnectEnabled, type ConnectPurpose } from '@/lib/facebook/publish';
 import { socialTokenKeyConfigured } from '@/lib/social/crypto';
 
 // GET - Facebook Login redirect target. Verifies state, exchanges the code, and keeps the user
@@ -32,26 +33,30 @@ export async function GET(request: NextRequest) {
   const token = await exchangeCode(code, url.origin);
   if (!token) return back('error');
 
-  // Community inbox: store each managed page's token (encrypted) for pages already in the app.
-  // The user token itself is not kept.
-  if (url.searchParams.get('state')?.startsWith('inbox.')) {
-    const inboxBack = (flag: string, extra = '') => {
-      const res = NextResponse.redirect(new URL(`/?tab=inbox&fb=${flag}${extra}`, url.origin));
+  // Connect pages (inbox / app publishing): store each managed page's token (encrypted) for pages
+  // already in the app. The user token itself is not kept.
+  const stateValue = url.searchParams.get('state') || '';
+  const purpose: ConnectPurpose | null = stateValue.startsWith('inbox.') ? 'inbox' : stateValue.startsWith('publish.') ? 'publish' : null;
+  if (purpose) {
+    const tab = purpose === 'inbox' ? 'inbox' : 'pages';
+    const flagPrefix = purpose === 'inbox' ? 'inbox' : 'publish';
+    const connectBack = (flag: string, extra = '') => {
+      const res = NextResponse.redirect(new URL(`/?tab=${tab}&fb=${flagPrefix}_${flag}${extra}`, url.origin));
       res.cookies.set(STATE_COOKIE, '', cookieOptions(0));
       return res;
     };
-    if (!inboxEnabled()) return inboxBack('inbox_off');
-    if (!socialTokenKeyConfigured()) return inboxBack('inbox_no_key');
+    if (!pageConnectEnabled(purpose)) return connectBack('off');
+    if (!socialTokenKeyConfigured()) return connectBack('no_key');
     try {
       const longToken = await longLivedUserToken(token);
       const supabase = createServiceClient();
       // Looks up only the pages on the Pages tab, so there is no limit on how many pages the account manages
       const [found, scopes] = await Promise.all([appPagesWithTokens(supabase, longToken), grantedScopes(longToken)]);
       const result = await savePageTokens(supabase, found.pages, scopes, user.email);
-      return inboxBack('inbox_connected', `&saved=${result.saved}&unmanaged=${found.unmanaged}`);
+      return connectBack('connected', `&saved=${result.saved}&unmanaged=${found.unmanaged}`);
     } catch (err) {
-      console.error('[inbox] connect failed', err instanceof Error ? err.message : err);
-      return inboxBack('inbox_error');
+      console.error(`[${purpose}] connect failed`, err instanceof Error ? err.message : err);
+      return connectBack('error');
     }
   }
 

@@ -222,7 +222,7 @@ export async function listConnectedPages(supabase: SupabaseClient): Promise<Conn
   return (data || []).map((r: any) => ({ ...r, scopes: String(r.scopes || '').split(',').filter(Boolean) }));
 }
 
-async function pageToken(supabase: SupabaseClient, facebookPageId: string): Promise<{ token: string; page: ConnectedPage } | null> {
+export async function pageToken(supabase: SupabaseClient, facebookPageId: string): Promise<{ token: string; page: ConnectedPage } | null> {
   const { data } = await supabase.from('fb_page_tokens').select(`${TOKEN_COLUMNS}, access_token_enc`).eq('facebook_page_id', facebookPageId).maybeSingle();
   if (!data || data.status !== 'active') return null;
   const token = decryptToken(data.access_token_enc, pageAad(facebookPageId));
@@ -232,7 +232,7 @@ async function pageToken(supabase: SupabaseClient, facebookPageId: string): Prom
   return { token, page: { ...rest, scopes: String(rest.scopes || '').split(',').filter(Boolean) } as ConnectedPage };
 }
 
-async function markNeedsReauth(supabase: SupabaseClient, facebookPageId: string, message: string) {
+export async function markNeedsReauth(supabase: SupabaseClient, facebookPageId: string, message: string) {
   await supabase.from('fb_page_tokens')
     .update({ status: 'needs_reauth', last_error: message.slice(0, 300), updated_at: new Date().toISOString() })
     .eq('facebook_page_id', facebookPageId);

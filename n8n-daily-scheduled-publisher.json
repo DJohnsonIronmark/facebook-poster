@@ -45,6 +45,10 @@
             {
               "name": "platform",
               "value": "eq.facebook"
+            },
+            {
+              "name": "publish_via",
+              "value": "eq.n8n"
             }
           ]
         },

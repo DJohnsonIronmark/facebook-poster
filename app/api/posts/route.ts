@@ -9,7 +9,8 @@ import { normalizePlatform } from '@/lib/instagram/rules';
 import { cleanBioUrl } from '@/lib/bio/rules';
 import { directPostDecision } from '@/lib/instagram/release';
 import { instagramPublishingEnabled, instagramRowProblem } from '@/lib/instagram/server';
-import { linkedinPublishingEnabled, xPublishingEnabled } from '@/lib/social/switches';
+import { facebookAppPublishingEnabled, linkedinPublishingEnabled, xPublishingEnabled } from '@/lib/social/switches';
+import { claimAndPublishFacebook, pagePublishVia, type FacebookPostRow } from '@/lib/facebook/publish';
 import {
   attachSocialIdentities, isSocialPlatform, loadConnectionsLite, loadPageMappings, pageSocialProblem, pickMappingFor,
   socialMediaUrlProblem, socialPublishConstraints, socialTextProblem,
@@ -20,6 +21,8 @@ import {
 // has passed (daily 6 AM run); same-day posts and "publish now" go straight to the n8n webhook.
 // LinkedIn / X rows are stored 'pending' (only while their switch is on) for the app's social
 // runner (/api/publish/social-run); they never go to the webhook and can't be published now.
+// Facebook pages set to publish_via='app' never use the webhook either: "publish now" publishes
+// here with the page's own token, and same-day/future posts wait for the app runner.
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -98,14 +101,23 @@ export async function POST(request: NextRequest) {
       const label = platform === 'instagram' ? 'Instagram' : platform === 'linkedin' ? 'LinkedIn' : 'X';
       return NextResponse.json({ error: `${label} posts need a schedule date` }, { status: 400 });
     }
-    const viaWebhook = decision.useWebhookIfSameDay && (!!publish_now || isScheduledForToday(scheduledIso));
-    if (viaWebhook && !N8N_WEBHOOK_URL) {
-      return NextResponse.json({ error: 'n8n webhook URL not configured' }, { status: 500 });
-    }
-
     // Direct posts schedule immediately, so uploaded (private) media is copied to the public
     // bucket now: n8n/Facebook fetch media_url unauthenticated once the row is 'pending'.
     const supabase = createServiceClient();
+
+    // Facebook page set to app publishing: no webhook; "publish now" publishes after the insert below
+    const appPublishing = platform === 'facebook' && (await pagePublishVia(supabase, String(facebook_page_id))) === 'app';
+    if (appPublishing && !facebookAppPublishingEnabled()) {
+      return NextResponse.json(
+        { error: 'This page is set to publish from the app, but app publishing is turned off. Switch the page back to n8n on the Pages tab, or turn app publishing on.' },
+        { status: 409 }
+      );
+    }
+    const viaWebhook = !appPublishing && decision.useWebhookIfSameDay && (!!publish_now || isScheduledForToday(scheduledIso));
+    if (viaWebhook && !N8N_WEBHOOK_URL) {
+      return NextResponse.json({ error: 'n8n webhook URL not configured' }, { status: 500 });
+    }
+    const appPublishNow = appPublishing && !!publish_now;
     const incoming = normalizeIncomingMediaUrl(media_url);
     if (mediaType && !incoming.ok) return NextResponse.json({ error: 'Invalid media_url' }, { status: 400 });
     if (platform === 'instagram') {
@@ -150,9 +162,10 @@ export async function POST(request: NextRequest) {
         location_number: body.location_number || null,
         post_content: processedContent,
         link_url: processedLinkUrl || null,
-        scheduled_for: scheduledIso,
-        status: publish_now ? 'published' : 'pending',
-        published_at: publish_now ? new Date().toISOString() : null,
+        // app "publish now": stored as due now, then claimed and published below
+        scheduled_for: appPublishNow ? new Date().toISOString() : scheduledIso,
+        status: publish_now && !appPublishNow ? 'published' : 'pending',
+        published_at: publish_now && !appPublishNow ? new Date().toISOString() : null,
         media_url: publicMediaUrl,
         media_type: mediaType,
         platform,
@@ -164,6 +177,15 @@ export async function POST(request: NextRequest) {
     if (insertErr || !saved) {
       console.error('posts POST insert', insertErr);
       return NextResponse.json({ error: 'Failed to save post' }, { status: 500 });
+    }
+
+    if (appPublishNow) {
+      const result = await claimAndPublishFacebook(supabase, saved as FacebookPostRow);
+      if (result.status === 'published') {
+        return NextResponse.json({ success: true, message: 'Post published successfully', post: { ...saved, status: 'published', facebook_post_id: result.facebookPostId } });
+      }
+      const why = result.status === 'failed' ? result.error : result.reason;
+      return NextResponse.json({ error: `Post saved but not published: ${why}` }, { status: 502 });
     }
 
     if (!viaWebhook) {

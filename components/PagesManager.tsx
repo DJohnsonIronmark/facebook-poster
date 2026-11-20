@@ -25,6 +25,10 @@ interface PageRow {
   x_username?: string | null;
   linkedin_connection_status?: string | null;
   x_connection_status?: string | null;
+  publish_via?: 'n8n' | 'app' | null;
+  fb_publish_ready?: boolean;
+  fb_token_status?: string | null;
+  fb_publish_problem?: string | null;
 }
 interface ClientOpt { id: string; name: string }
 interface FbPage { id: string; name: string; picture: string | null; location: string | null; already_added: boolean }
@@ -36,6 +40,9 @@ const FB_FLAG_MESSAGES: Record<string, { kind: 'ok' | 'error'; text: string }> =
   not_configured: { kind: 'error', text: 'Facebook sign-in isn\'t set up yet (FACEBOOK_APP_ID / FACEBOOK_APP_SECRET). Use "Add manually" for now.' },
   unauthorized: { kind: 'error', text: 'Only admins and managers can add pages.' },
   error: { kind: 'error', text: 'Facebook sign-in failed. Please try again.' },
+  publish_off: { kind: 'error', text: 'App publishing is not turned on yet (FACEBOOK_APP_PUBLISHING_ENABLED).' },
+  publish_no_key: { kind: 'error', text: 'SOCIAL_TOKEN_KEY is not set, so page access can\'t be stored safely.' },
+  publish_error: { kind: 'error', text: 'Connecting pages for publishing failed. Please try again.' },
 };
 
 /** Safety stop for one Facebook account's page list (loaded in chunks of up to 300). */
@@ -67,6 +74,7 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   // LinkedIn / X
   const { role } = useAuth();
   const isAdmin = role === 'admin';
+  const canConnect = role === 'admin' || role === 'manager';
   const [socialStatus, setSocialStatus] = useState<SocialStatus | null>(null);
   const [connections, setConnections] = useState<SocialConnection[]>([]);
   const [connectionsLoading, setConnectionsLoading] = useState(true);
@@ -193,7 +201,20 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
     }
     const flag = params.get('fb');
     if (flag) {
-      setMessage(FB_FLAG_MESSAGES[flag] || null);
+      if (flag === 'publish_connected') {
+        const saved = Number(params.get('saved') || 0);
+        const unmanaged = Number(params.get('unmanaged') || 0);
+        setMessage({
+          kind: saved > 0 ? 'ok' : 'error',
+          text: saved > 0
+            ? `Connected ${saved} page(s) for app publishing.${unmanaged ? ` ${unmanaged} page(s) on this tab aren't managed by that Facebook login, so they weren't connected.` : ''} An admin can now set them to publish from the app below.`
+            : 'No pages were connected: that Facebook login doesn\'t manage any of the pages on this tab. Add its pages first, or connect with a login that manages them.',
+        });
+        params.delete('saved');
+        params.delete('unmanaged');
+      } else {
+        setMessage(FB_FLAG_MESSAGES[flag] || null);
+      }
       params.delete('fb');
       window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`);
       if (flag === 'connected') loadFacebookPages();
@@ -266,6 +287,8 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   };
 
   const afterMappingSaved = async () => { await load(); onPagesChanged(); };
+  const appPublishingOn = !!socialStatus?.facebook_app.enabled;
+  const pagesOnApp = pages.filter((p) => p.publish_via === 'app').length;
 
   return (
     <div className="space-y-4">
@@ -289,6 +312,13 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
             <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
             Connect with Facebook
           </a>
+          {appPublishingOn && canConnect && (
+            <a href="/api/facebook/oauth/start?purpose=publish"
+              title="Sign in with a Facebook account that manages the pages, so the app can post to them directly"
+              className="px-4 py-2 rounded-lg border border-[#1877f2] text-[#1877f2] text-sm font-semibold hover:bg-blue-50">
+              Connect pages for publishing
+            </a>
+          )}
           <button onClick={() => setMode(mode === 'manual' ? 'none' : 'manual')}
             className="px-4 py-2 rounded-lg bg-gray-100 text-gray-800 text-sm font-medium hover:bg-gray-200">
             {mode === 'manual' ? 'Close' : 'Add manually'}
@@ -296,9 +326,17 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
         </div>
 
         <p className="text-xs text-gray-500 bg-amber-50 border border-amber-100 rounded px-3 py-2">
-          Publishing uses the n8n Facebook connection, not this sign-in. A new page only publishes if that connection&apos;s
-          Facebook account also has access to the page (e.g. through Business Manager).
+          Pages set to <strong>n8n</strong> publish with the n8n Facebook connection, not this sign-in: a new page only publishes if
+          that connection&apos;s Facebook account also has access to the page (e.g. through Business Manager).
+          {appPublishingOn && <> Pages set to <strong>App</strong> publish with their own access, saved by &ldquo;Connect pages for publishing&rdquo;.</>}
         </p>
+
+        {socialStatus && !appPublishingOn && pagesOnApp > 0 && (
+          <div className="text-sm rounded px-3 py-2 bg-red-50 text-red-700" role="alert">
+            App publishing is turned off, but {pagesOnApp} page(s) are set to publish from the app. Their posts will wait until it&apos;s
+            turned back on. To publish them through n8n instead, an admin can switch those pages back to n8n.
+          </div>
+        )}
 
         {message && (
           <div className={`text-sm rounded px-3 py-2 ${message.kind === 'ok' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`} role="status">
@@ -443,6 +481,9 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
                   Page ID {p.facebook_page_id}{p.city ? ` · ${p.city}` : ''}{p.client_id ? ` · ${clientName.get(p.client_id) || 'client'}` : ''}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1">
+                  {(appPublishingOn || p.publish_via === 'app') && (
+                    <FacebookPublishCell page={p} isAdmin={isAdmin} appPublishingOn={appPublishingOn} onSaved={afterMappingSaved} />
+                  )}
                   <LinkedInMappingCell page={p} connections={connections} isAdmin={isAdmin} loadOrgs={loadOrgs} onSaved={afterMappingSaved} />
                   <XMappingCell page={p} connections={connections} isAdmin={isAdmin} onSaved={afterMappingSaved} />
                 </div>
@@ -512,5 +553,60 @@ function EditRow({ page, onDone }: { page: PageRow; onDone: (saved: boolean) => 
         </button>
       </div>
     </li>
+  );
+}
+
+/** Facebook: who publishes this page (n8n's shared connection, or the app with the page's own access). */
+function FacebookPublishCell({ page, isAdmin, appPublishingOn, onSaved }: {
+  page: PageRow; isAdmin: boolean; appPublishingOn: boolean; onSaved: () => void | Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const via = page.publish_via === 'app' ? 'app' : 'n8n';
+  const status = page.fb_publish_ready
+    ? { text: 'connected', cls: 'text-green-700' }
+    : page.fb_token_status === 'needs_reauth'
+      ? { text: 'reconnect needed', cls: 'text-red-700' }
+      : page.fb_token_status
+        ? { text: 'missing posting permission', cls: 'text-amber-700' }
+        : { text: 'not connected', cls: 'text-gray-500' };
+
+  const change = async (next: 'n8n' | 'app') => {
+    if (next === via) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/pages', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: page.id, publish_via: next }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(typeof data.error === 'string' ? data.error : 'Could not change the publisher'); return; }
+      await onSaved();
+    } catch {
+      setError('Could not change the publisher');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="text-xs text-gray-600 flex flex-wrap items-center gap-2">
+      <span className="font-medium text-gray-700">Facebook publishes via</span>
+      {isAdmin ? (
+        <select value={via} disabled={saving} onChange={(e) => change(e.target.value === 'app' ? 'app' : 'n8n')}
+          aria-label={`Facebook publisher for ${page.location_name}`}
+          className="border border-gray-300 rounded px-1.5 py-0.5 text-xs">
+          <option value="n8n">n8n</option>
+          <option value="app" disabled={!appPublishingOn || !page.fb_publish_ready}
+            title={!appPublishingOn ? 'App publishing is turned off' : page.fb_publish_problem || ''}>
+            App
+          </option>
+        </select>
+      ) : (
+        <span className="font-semibold">{via === 'app' ? 'App' : 'n8n'}</span>
+      )}
+      <span className={status.cls} title={page.fb_publish_problem || ''}>({status.text})</span>
+      {error && <span className="text-red-700" role="alert">{error}</span>}
+    </div>
   );
 }

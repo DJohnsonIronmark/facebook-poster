@@ -11,6 +11,8 @@ export type SocialPlatform = 'linkedin' | 'x';
 
 /** GET /api/social/status */
 export interface SocialStatus {
+  /** FACEBOOK_APP_PUBLISHING_ENABLED: pages set to publish_via='app' are published by the app */
+  facebook_app: { enabled: boolean };
   instagram: { enabled: boolean };
   linkedin: { enabled: boolean; configured: boolean };
   x: { enabled: boolean; configured: boolean };
@@ -18,6 +20,7 @@ export interface SocialStatus {
 }
 
 export const SOCIAL_STATUS_OFF: SocialStatus = {
+  facebook_app: { enabled: false },
   instagram: { enabled: false },
   linkedin: { enabled: false, configured: false },
   x: { enabled: false, configured: false },
@@ -39,6 +42,7 @@ export function parseSocialStatus(data: unknown): SocialStatus {
   if (!data || typeof data !== 'object') return SOCIAL_STATUS_OFF;
   const o = data as Record<string, unknown>;
   return {
+    facebook_app: { enabled: readSection(o.facebook_app).enabled },
     instagram: { enabled: readSection(o.instagram).enabled },
     linkedin: readSection(o.linkedin),
     x: readSection(o.x),

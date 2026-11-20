@@ -329,10 +329,12 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         failures.push(`${post.franchise_name}: ${why}; post not released`);
       }
 
-      // Same-day posts go to the Facebook webhook: Facebook rows only, never Instagram / LinkedIn / X
+      // Same-day posts go to the Facebook webhook: Facebook rows only, never Instagram / LinkedIn / X,
+      // and never pages set to publish_via='app'
       let webhookFailed = 0;
       for (const post of released) {
         if (!shouldSendSameDay(post, isScheduledForToday(post.scheduled_for))) continue; // n8n daily publisher handles the rest
+        if (post.publish_via === 'app') continue; // page publishes from the app: the app runner picks it up when due
         const res = await sendScheduledPostToWebhook(post);
         if (!res.ok) {
           webhookFailed++;
