@@ -53,6 +53,8 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   const [fbPages, setFbPages] = useState<FbPage[]>([]);
   const [fbSelected, setFbSelected] = useState<string[]>([]);
   const [fbLoading, setFbLoading] = useState(false);
+  const [fbSearch, setFbSearch] = useState('');
+  const [fbHideAdded, setFbHideAdded] = useState(false);
   const [filter, setFilter] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   // LinkedIn / X
@@ -180,15 +182,34 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   const importFacebook = async () => {
     const chosen = fbPages.filter((p) => fbSelected.includes(p.id));
     const ok = await submit(chosen.map((p) => ({ facebook_page_id: p.id, location_name: p.name })), 'facebook');
-    if (ok) { setFbPages([]); setFbSelected([]); setMode('none'); }
+    if (ok) { setFbPages([]); setFbSelected([]); setFbSearch(''); setMode('none'); }
   };
 
   const disconnect = async () => {
     await fetch('/api/facebook/pages', { method: 'DELETE' });
-    setFbPages([]); setFbSelected([]); setMode('none');
+    setFbPages([]); setFbSelected([]); setFbSearch(''); setMode('none');
   };
 
   const importable = fbPages.filter((p) => !p.already_added);
+
+  // Search the Facebook page list (can be hundreds of pages): every word must match the name, page ID or location
+  const fbVisible = useMemo(() => {
+    const words = fbSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return fbPages
+      .filter((p) => !(fbHideAdded && p.already_added))
+      .filter((p) => {
+        if (words.length === 0) return true;
+        const hay = `${p.name} ${p.id} ${p.location || ''}`.toLowerCase();
+        return words.every((w) => hay.includes(w));
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  }, [fbPages, fbSearch, fbHideAdded]);
+  const visibleImportableIds = fbVisible.filter((p) => !p.already_added).map((p) => p.id);
+  const allVisibleSelected = visibleImportableIds.length > 0 && visibleImportableIds.every((id) => fbSelected.includes(id));
+  const toggleVisible = () => {
+    if (allVisibleSelected) setFbSelected(fbSelected.filter((id) => !visibleImportableIds.includes(id)));
+    else setFbSelected(Array.from(new Set([...fbSelected, ...visibleImportableIds])));
+  };
 
   const afterMappingSaved = async () => { await load(); onPagesChanged(); };
 
@@ -269,16 +290,40 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
               <span className="font-medium text-gray-800 mr-auto">
                 {fbLoading ? 'Loading your Facebook pages…' : `${fbPages.length} page(s) on your Facebook account · ${importable.length} not yet added`}
               </span>
-              {importable.length > 0 && (
-                <button onClick={() => setFbSelected(fbSelected.length === importable.length ? [] : importable.map((p) => p.id))}
-                  className="text-blue-600 hover:underline">
-                  {fbSelected.length === importable.length ? 'Select none' : 'Select all'}
-                </button>
-              )}
               <button onClick={disconnect} className="text-gray-500 hover:underline">Disconnect</button>
             </div>
+            {fbPages.length > 0 && (
+              <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b text-sm">
+                <input type="search" value={fbSearch} autoFocus
+                  onChange={(e) => setFbSearch(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Escape') setFbSearch(''); }}
+                  placeholder="Search by page name, page ID, city or state…"
+                  aria-label="Search your Facebook pages"
+                  className="flex-1 min-w-[220px] border border-gray-300 rounded-lg px-3 py-1.5" />
+                <label className="flex items-center gap-1.5 text-gray-600">
+                  <input type="checkbox" checked={fbHideAdded} onChange={(e) => setFbHideAdded(e.target.checked)} className="w-4 h-4" />
+                  Hide pages already added
+                </label>
+                <span className="text-gray-500" aria-live="polite">
+                  Showing {fbVisible.length} of {fbPages.length}
+                </span>
+                {visibleImportableIds.length > 0 && (
+                  <button onClick={toggleVisible} className="text-blue-600 hover:underline">
+                    {allVisibleSelected
+                      ? `Unselect ${fbSearch.trim() ? 'shown' : 'all'}`
+                      : `Select ${fbSearch.trim() ? `all ${visibleImportableIds.length} shown` : 'all'}`}
+                  </button>
+                )}
+                {fbSelected.length > 0 && (
+                  <span className="text-gray-700">
+                    {fbSelected.length} selected
+                    <button onClick={() => setFbSelected([])} className="ml-2 text-gray-500 hover:underline">Clear</button>
+                  </span>
+                )}
+              </div>
+            )}
             <ul className="max-h-80 overflow-auto divide-y">
-              {fbPages.map((p) => (
+              {fbVisible.map((p) => (
                 <li key={p.id} className="flex items-center gap-3 px-3 py-2">
                   <input type="checkbox" disabled={p.already_added} checked={fbSelected.includes(p.id)}
                     onChange={(e) => setFbSelected(e.target.checked ? [...fbSelected, p.id] : fbSelected.filter((x) => x !== p.id))}
@@ -293,6 +338,12 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
                 </li>
               ))}
               {!fbLoading && fbPages.length === 0 && <li className="px-3 py-4 text-sm text-gray-500">No pages found on this Facebook account.</li>}
+              {!fbLoading && fbPages.length > 0 && fbVisible.length === 0 && (
+                <li className="px-3 py-4 text-sm text-gray-500">
+                  No pages match{fbSearch.trim() ? ` "${fbSearch.trim()}"` : ''}.
+                  {fbSearch.trim() && <button onClick={() => setFbSearch('')} className="ml-2 text-blue-600 hover:underline">Clear search</button>}
+                </li>
+              )}
             </ul>
             <div className="flex justify-end px-3 py-2 border-t">
               <button onClick={importFacebook} disabled={saving || fbSelected.length === 0}
