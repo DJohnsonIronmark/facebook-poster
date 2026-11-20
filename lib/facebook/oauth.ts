@@ -94,14 +94,29 @@ export interface ManagedPage {
   location: string | null;
 }
 
-/** Pages the user manages (/me/accounts), following paging up to 1,000 pages. */
-export async function listManagedPages(userToken: string): Promise<ManagedPage[]> {
+/** Graph paging cursor: base64url-ish, bounded. Anything else is refused. */
+export const PAGE_CURSOR_RE = /^[A-Za-z0-9_\-=]{1,512}$/;
+
+const PAGE_FIELDS = 'id,name,picture{url},location{city,state}';
+const PAGE_BATCH = 100;           // pages per Graph call (Graph's /me/accounts maximum page size we rely on)
+const CALLS_PER_CHUNK = 3;        // Graph calls per request → up to 300 pages per request
+const CHUNK_BUDGET_MS = 8000;     // stop starting new Graph calls after this, so a request never runs long
+
+/**
+ * One chunk of the pages the user manages (/me/accounts): up to 300 pages per call, plus the cursor
+ * to continue from (null = no more pages). There is no overall cap here: the browser keeps asking
+ * with the returned cursor until it is null, so each request stays short whatever the account size.
+ */
+export async function listManagedPagesChunk(userToken: string, after: string | null): Promise<{ pages: ManagedPage[]; after: string | null }> {
+  if (after !== null && !PAGE_CURSOR_RE.test(after)) throw new Error('Invalid page cursor');
+  const started = Date.now();
   const out: ManagedPage[] = [];
-  let next: string | null =
-    `https://graph.facebook.com/${GRAPH_VERSION}/me/accounts?fields=id,name,picture{url},location{city,state}&limit=100`;
-  for (let i = 0; next && i < 10; i++) {
-    const url: URL = new URL(next);
-    if (url.hostname !== 'graph.facebook.com') break; // only follow Graph paging links
+  let cursor: string | null = after;
+  for (let i = 0; i < CALLS_PER_CHUNK; i++) {
+    const url = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/me/accounts`);
+    url.searchParams.set('fields', PAGE_FIELDS);
+    url.searchParams.set('limit', String(PAGE_BATCH));
+    if (cursor) url.searchParams.set('after', cursor);
     url.searchParams.set('access_token', userToken);
     const res = await fetch(url, { signal: AbortSignal.timeout(15000), cache: 'no-store' });
     if (!res.ok) throw new Error(`Graph /me/accounts failed (${res.status})`);
@@ -110,7 +125,10 @@ export async function listManagedPages(userToken: string): Promise<ManagedPage[]
       const loc = p.location ? [p.location.city, p.location.state].filter(Boolean).join(', ') : '';
       out.push({ id: String(p.id), name: String(p.name || ''), picture: p.picture?.data?.url || null, location: loc || null });
     }
-    next = data.paging?.next || null;
+    // Graph includes cursors on the last page too; only `paging.next` means there is more
+    const nextCursor = data.paging?.next ? data.paging?.cursors?.after : null;
+    cursor = typeof nextCursor === 'string' && PAGE_CURSOR_RE.test(nextCursor) ? nextCursor : null;
+    if (!cursor || Date.now() - started > CHUNK_BUDGET_MS) break;
   }
-  return out;
+  return { pages: out, after: cursor };
 }
