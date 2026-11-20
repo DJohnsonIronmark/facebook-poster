@@ -10,6 +10,7 @@ import { normalizeIncomingMediaUrl } from '@/lib/media/server';
 import { normalizePlatform, type Platform } from '@/lib/instagram/rules';
 import { instagramRowProblem } from '@/lib/instagram/server';
 import { isSocialPlatform, loadConnectionsLite, pageSocialProblem, socialMediaUrlProblem, socialTextProblem } from '@/lib/social/server';
+import { cleanBioUrl } from '@/lib/bio/rules';
 import { randomUUID } from 'crypto';
 
 export const maxDuration = 300; // large multi-client uploads fetch link previews
@@ -26,6 +27,7 @@ interface DraftRow {
   media_url?: string | null;
   platform?: string | null;        // 'facebook' (default) | 'instagram' | 'linkedin' | 'x'
   post_group_id?: string | null;   // same value on every platform's row of one post (client-generated uuid)
+  bio_link_url?: string | null;    // Instagram rows: link in bio tile link (placeholders allowed)
 }
 
 /**
@@ -48,6 +50,12 @@ function remapGroups(rows: DraftRow[]): Map<string, string> {
   const out = new Map<string, string>();
   for (const g of Array.from(seen.keys())) if (!bad.has(g)) out.set(g, randomUUID());
   return out;
+}
+
+/** Instagram link in bio tile link with placeholders filled in (already validated; invalid → null). */
+function bioLinkFor(row: DraftRow, values: Parameters<typeof replacePlaceholders>[1]): string | null {
+  const bio = cleanBioUrl(replacePlaceholders(String(row.bio_link_url || '').trim(), values));
+  return bio.ok ? bio.value : null;
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -147,6 +155,8 @@ export async function POST(request: NextRequest) {
         igUserId: page.ig_user_id,
       });
       if (problem) return skipped.push({ row: index + 1, reason: `Instagram: ${problem}` });
+      const bio = cleanBioUrl(replacePlaceholders(String(row.bio_link_url || '').trim(), values));
+      if (!bio.ok) return skipped.push({ row: index + 1, reason: `Instagram bio_link: ${bio.error}` });
     }
     if (isSocialPlatform(platform)) {
       const values = { city: page.city, franchise_name: page.location_name, location_number: page.location_number, base_url: page.base_url, phone: page.phone };
@@ -214,6 +224,8 @@ export async function POST(request: NextRequest) {
         client_id: client.id,
         platform,
         post_group_id: groupId,
+        // Only sent when set, so uploads keep working before the link in bio migration is applied
+        ...(platform === 'instagram' && bioLinkFor(row, values) ? { bio_link_url: bioLinkFor(row, values) } : {}),
         link_preview: linkUrl ? await previewFor(linkUrl) : null,
       };
     });

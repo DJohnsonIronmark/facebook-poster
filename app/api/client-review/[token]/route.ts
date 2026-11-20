@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { hashReviewToken, isWellFormedToken } from '@/lib/review/tokens';
-import { appBaseUrl, notifyReadyToPost } from '@/lib/review/notify';
+import { appBaseUrl, notifyClientFeedback, notifyReadyToPost } from '@/lib/review/notify';
 import { MAX_POST_LENGTH } from '@/lib/review/types';
 import { signPostMedia } from '@/lib/media/server';
 import { attachInstagramUsernames, instagramCaptionProblem } from '@/lib/instagram/server';
@@ -79,6 +79,8 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
   const byId = new Map<string, any>((batch.posts || []).map((p: any) => [p.id, p]));
   const edits: any[] = Array.isArray(body.posts) ? body.posts : [];
   let editedCount = 0;
+  // What changed on this save, for the internal heads-up email (save without approve)
+  const changes: { franchise_name: string; platform: string | null; edited: boolean; comment: string | null }[] = [];
 
   for (const edit of edits) {
     const post = byId.get(String(edit?.id || ''));
@@ -103,6 +105,10 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
       if (comment !== post.client_comment) patch.client_comment = comment;
     }
     if (Object.keys(patch).length === 0) continue;
+    const newComment = typeof patch.client_comment === 'string' ? patch.client_comment : null;
+    if (patch.post_content || newComment) {
+      changes.push({ franchise_name: post.franchise_name, platform: post.platform ?? null, edited: !!patch.post_content, comment: newComment });
+    }
 
     const { error } = await supabase.from('facebook_scheduled_posts').update(patch)
       .eq('id', post.id).eq('review_batch_id', batch.id).eq('status', 'client_review');
@@ -116,7 +122,19 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
     }
   }
 
-  if (action === 'save') return NextResponse.json({ success: true, saved: editedCount });
+  if (action === 'save') {
+    // Tell the team (account manager, cc uploader) only when something actually changed
+    const email = changes.length === 0 ? 'skipped' : await notifyClientFeedback({
+      accountManager: batch.client?.account_manager_email,
+      uploadedBy: batch.created_by_email,
+      clientName: batch.client?.name || 'Client',
+      batchName: batch.name || 'Review batch',
+      savedBy: approver || null,
+      changes,
+      baseUrl: appBaseUrl(request),
+    });
+    return NextResponse.json({ success: true, saved: editedCount, email });
+  }
 
   // Claim the batch first (conditional on still being in client review), then release its posts
   const now = new Date().toISOString();

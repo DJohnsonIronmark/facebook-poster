@@ -174,3 +174,32 @@ export function notifyReadyToPost(opts: {
     html,
   });
 }
+
+/**
+ * Client saved edits or comments WITHOUT approving → internal heads-up to the account manager,
+ * cc the team member who uploaded. Ironmark addresses only; never sent to the client.
+ */
+export function notifyClientFeedback(opts: {
+  accountManager: string | null; uploadedBy?: string | null; clientName: string; batchName: string; savedBy: string | null;
+  changes: { franchise_name: string; platform?: string | null; edited: boolean; comment: string | null }[];
+  baseUrl: string;
+}): Promise<EmailResult> {
+  const label = (p?: string | null) => (p === 'instagram' ? 'Instagram' : p === 'linkedin' ? 'LinkedIn' : p === 'x' ? 'X' : 'Facebook');
+  const rows = opts.changes.slice(0, 50).map((c) => {
+    const what = [c.edited ? 'edited the text' : '', c.comment ? 'left a comment' : ''].filter(Boolean).join(' and ');
+    const comment = c.comment ? `<div style="color:#1c1e21;margin-top:4px">&ldquo;${escapeHtml(c.comment.length > 300 ? `${c.comment.slice(0, 300)}…` : c.comment)}&rdquo;</div>` : '';
+    return `<li style="margin:0 0 8px"><strong>${escapeHtml(c.franchise_name)}</strong> <span style="color:#65676b">(${label(c.platform)})</span>: ${what}${comment}</li>`;
+  }).join('');
+  const more = opts.changes.length > 50 ? `<p style="color:#65676b">…and ${opts.changes.length - 50} more.</p>` : '';
+  const who = opts.savedBy ? escapeHtml(opts.savedBy) : 'The client';
+  const body = `<p>${who} saved changes on <strong>${escapeHtml(opts.clientName)}</strong> (${escapeHtml(opts.batchName)}) but has <strong>not approved yet</strong>.</p>
+  <ul style="padding-left:18px">${rows}</ul>${more}
+  <p style="color:#65676b">The posts stay with the client until they approve. Follow up if a comment needs an answer.</p>`;
+  return sendEmail({
+    to: isAllowedSender(opts.accountManager) ? [opts.accountManager] : [],
+    cc: [opts.uploadedBy],
+    subject: `Client feedback (not approved yet): ${opts.clientName}`,
+    html: layout('Client saved edits or comments', body, `${opts.baseUrl}/?tab=approvals`, 'Open approvals',
+      'Sent by the Ironmark Facebook Poster. This mailbox is not monitored.'),
+  });
+}

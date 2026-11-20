@@ -6,6 +6,7 @@ import { UUID_RE, pageRequiresApproval } from '@/lib/review/guards';
 import { isScheduledForToday, normalizeMediaType } from '@/lib/publisher';
 import { instagramPublishConstraints, normalizeIncomingMediaUrl, publishDraftMedia, signPostMedia } from '@/lib/media/server';
 import { normalizePlatform } from '@/lib/instagram/rules';
+import { cleanBioUrl } from '@/lib/bio/rules';
 import { directPostDecision } from '@/lib/instagram/release';
 import { instagramPublishingEnabled, instagramRowProblem } from '@/lib/instagram/server';
 import { linkedinPublishingEnabled, xPublishingEnabled } from '@/lib/social/switches';
@@ -116,6 +117,9 @@ export async function POST(request: NextRequest) {
       });
       if (problem) return NextResponse.json({ error: `Instagram: ${problem}` }, { status: 400 });
     }
+    // Instagram: link in bio tile link (placeholders allowed)
+    const bio = platform === 'instagram' ? cleanBioUrl(replacePlaceholders(String(body.bio_link_url || '').trim(), placeholderValues)) : null;
+    if (bio && !bio.ok) return NextResponse.json({ error: `Instagram bio_link: ${bio.error}` }, { status: 400 });
     if (isSocialPlatform(platform)) {
       const label = platform === 'x' ? 'X' : 'LinkedIn';
       const mediaValue = mediaType && incoming.ok ? incoming.value : null;
@@ -153,6 +157,7 @@ export async function POST(request: NextRequest) {
         media_type: mediaType,
         platform,
         post_group_id: postGroupId,
+        ...(bio && bio.ok && bio.value ? { bio_link_url: bio.value } : {}),
       })
       .select('*')
       .single();

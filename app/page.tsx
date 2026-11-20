@@ -7,6 +7,8 @@ import PostList from '@/components/PostList';
 import PostFilters, { FilterState } from '@/components/PostFilters';
 import ApprovalsTab from '@/components/ApprovalsTab';
 import PagesManager from '@/components/PagesManager';
+import LinkInBioTab from '@/components/LinkInBioTab';
+import InboxTab from '@/components/InboxTab';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/context/AuthContext';
 
@@ -54,7 +56,7 @@ export default function Home() {
   const [pages, setPages] = useState<FacebookPage[]>([]);
   const [posts, setPosts] = useState<ScheduledPost[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'pages'>('create');
+  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'inbox' | 'bio' | 'pages'>('create');
   const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
   const router = useRouter();
   const supabase = createClient();
@@ -63,7 +65,7 @@ export default function Home() {
   // Deep link from notification emails: /?tab=approvals
   useEffect(() => {
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published' || tab === 'pages') setActiveTab(tab);
+    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published' || tab === 'inbox' || tab === 'bio' || tab === 'pages') setActiveTab(tab);
   }, []);
 
   const handleLogout = async () => {
@@ -229,6 +231,26 @@ export default function Home() {
             >
               Published ({publishedPosts.length})
             </button>
+            <button
+              onClick={() => setActiveTab('inbox')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'inbox'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Inbox
+            </button>
+            <button
+              onClick={() => setActiveTab('bio')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'bio'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Link in bio
+            </button>
             {(role === 'admin' || role === 'manager') && (
               <button
                 onClick={() => setActiveTab('pages')}
@@ -252,6 +274,12 @@ export default function Home() {
         )}
         {activeTab === 'pages' && (role === 'admin' || role === 'manager') && (
           <PagesManager onPagesChanged={fetchPages} />
+        )}
+        {activeTab === 'inbox' && (
+          <InboxTab canAct={role === 'admin' || role === 'manager'} />
+        )}
+        {activeTab === 'bio' && (
+          <LinkInBioTab canEdit={role === 'admin' || role === 'manager'} />
         )}
         {activeTab === 'approvals' && (
           <ApprovalsTab
