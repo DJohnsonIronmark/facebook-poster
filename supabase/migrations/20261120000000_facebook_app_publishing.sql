@@ -15,20 +15,28 @@
 --   3. FACEBOOK_APP_PUBLISHING_ENABLED=true in Vercel
 --   4. move pages to 'app' one at a time on the Pages tab
 -- Step 2 must never come before step 1: a filter on a missing column breaks ALL Facebook publishing.
+--
+-- Additive only (no DROP statements) and re-runnable: constraints are added only if missing and the
+-- triggers use CREATE OR REPLACE. The trigger functions need no REVOKE: Postgres refuses to call a
+-- trigger function directly, and they are not SECURITY DEFINER.
 
 ALTER TABLE public.facebook_pages
   ADD COLUMN IF NOT EXISTS publish_via TEXT NOT NULL DEFAULT 'n8n';
-ALTER TABLE public.facebook_pages
-  DROP CONSTRAINT IF EXISTS facebook_pages_publish_via_check;
-ALTER TABLE public.facebook_pages
-  ADD CONSTRAINT facebook_pages_publish_via_check CHECK (publish_via IN ('n8n', 'app'));
-
 ALTER TABLE public.facebook_scheduled_posts
   ADD COLUMN IF NOT EXISTS publish_via TEXT NOT NULL DEFAULT 'n8n';
-ALTER TABLE public.facebook_scheduled_posts
-  DROP CONSTRAINT IF EXISTS facebook_scheduled_posts_publish_via_check;
-ALTER TABLE public.facebook_scheduled_posts
-  ADD CONSTRAINT facebook_scheduled_posts_publish_via_check CHECK (publish_via IN ('n8n', 'app'));
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'facebook_pages_publish_via_check') THEN
+    ALTER TABLE public.facebook_pages
+      ADD CONSTRAINT facebook_pages_publish_via_check CHECK (publish_via IN ('n8n', 'app'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'facebook_scheduled_posts_publish_via_check') THEN
+    ALTER TABLE public.facebook_scheduled_posts
+      ADD CONSTRAINT facebook_scheduled_posts_publish_via_check CHECK (publish_via IN ('n8n', 'app'));
+  END IF;
+END;
+$$;
 
 COMMENT ON COLUMN public.facebook_pages.publish_via IS
   'Who publishes this page''s Facebook posts: n8n (shared credential) or app (page token in fb_page_tokens).';
@@ -50,8 +58,7 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_fb_post_copy_publish_via ON public.facebook_scheduled_posts;
-CREATE TRIGGER trg_fb_post_copy_publish_via
+CREATE OR REPLACE TRIGGER trg_fb_post_copy_publish_via
   BEFORE INSERT OR UPDATE OF facebook_page_id ON public.facebook_scheduled_posts
   FOR EACH ROW EXECUTE FUNCTION public.fb_post_copy_publish_via();
 
@@ -72,11 +79,6 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_fb_page_cascade_publish_via ON public.facebook_pages;
-CREATE TRIGGER trg_fb_page_cascade_publish_via
+CREATE OR REPLACE TRIGGER trg_fb_page_cascade_publish_via
   AFTER UPDATE OF publish_via ON public.facebook_pages
   FOR EACH ROW EXECUTE FUNCTION public.fb_page_cascade_publish_via();
-
--- Trigger functions are not meant to be called directly
-REVOKE EXECUTE ON FUNCTION public.fb_post_copy_publish_via() FROM PUBLIC, anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.fb_page_cascade_publish_via() FROM PUBLIC, anon, authenticated;
