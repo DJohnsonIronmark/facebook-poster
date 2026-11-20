@@ -4,12 +4,14 @@ import {
   STATE_COOKIE, TOKEN_COOKIE, TOKEN_TTL_SECONDS, cookieOptions, exchangeCode, facebookConfigured, sealToken, statesMatch,
 } from '@/lib/facebook/oauth';
 import { createServiceClient } from '@/lib/supabase/server';
-import { grantedScopes, longLivedUserToken, pagesWithTokens, savePageTokens } from '@/lib/inbox/server';
+import { appPagesWithTokens, grantedScopes, longLivedUserToken, savePageTokens } from '@/lib/inbox/server';
 import { pageConnectEnabled, type ConnectPurpose } from '@/lib/facebook/publish';
 import { socialTokenKeyConfigured } from '@/lib/social/crypto';
 
 // GET - Facebook Login redirect target. Verifies state, exchanges the code, and keeps the user
 // token only in an encrypted httpOnly cookie, then returns to the Pages tab.
+export const maxDuration = 60;
+
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const back = (flag: string) => {
@@ -47,9 +49,11 @@ export async function GET(request: NextRequest) {
     if (!socialTokenKeyConfigured()) return connectBack('no_key');
     try {
       const longToken = await longLivedUserToken(token);
-      const [pages, scopes] = await Promise.all([pagesWithTokens(longToken), grantedScopes(longToken)]);
-      const result = await savePageTokens(createServiceClient(), pages, scopes, user.email);
-      return connectBack('connected', `&saved=${result.saved}&skipped=${result.notInApp}`);
+      const supabase = createServiceClient();
+      // Looks up only the pages on the Pages tab, so there is no limit on how many pages the account manages
+      const [found, scopes] = await Promise.all([appPagesWithTokens(supabase, longToken), grantedScopes(longToken)]);
+      const result = await savePageTokens(supabase, found.pages, scopes, user.email);
+      return connectBack('connected', `&saved=${result.saved}&unmanaged=${found.unmanaged}`);
     } catch (err) {
       console.error(`[${purpose}] connect failed`, err instanceof Error ? err.message : err);
       return connectBack('error');

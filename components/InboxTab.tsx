@@ -86,12 +86,12 @@ export default function InboxTab({ canAct }: { canAct: boolean }) {
     if (!flag) return;
     if (flag === 'inbox_connected') {
       const saved = Number(q.get('saved') || 0);
-      const skipped = Number(q.get('skipped') || 0);
+      const unmanaged = Number(q.get('unmanaged') || 0);
       setMessage({
         kind: saved > 0 ? 'ok' : 'error',
         text: saved > 0
-          ? `Connected ${saved} page${saved === 1 ? '' : 's'} for the inbox.${skipped ? ` ${skipped} other page${skipped === 1 ? '' : 's'} you manage aren't on the Pages tab, so they were skipped.` : ''}`
-          : 'None of the pages you manage are on the Pages tab yet. Add them there first.',
+          ? `Connected ${saved} page${saved === 1 ? '' : 's'} for the inbox.${unmanaged ? ` ${unmanaged} page${unmanaged === 1 ? '' : 's'} on the Pages tab ${unmanaged === 1 ? "isn't" : "aren't"} managed by that Facebook login, so ${unmanaged === 1 ? 'it was' : 'they were'} skipped.` : ''}`
+          : 'That Facebook login doesn\'t manage any of the pages on the Pages tab. Add its pages there first, or connect with a login that manages them.',
       });
     } else if (FLAGS[flag]) setMessage(FLAGS[flag]);
     window.history.replaceState(null, '', '/?tab=inbox');

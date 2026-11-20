@@ -45,6 +45,9 @@ const FB_FLAG_MESSAGES: Record<string, { kind: 'ok' | 'error'; text: string }> =
   publish_error: { kind: 'error', text: 'Connecting pages for publishing failed. Please try again.' },
 };
 
+/** Safety stop for one Facebook account's page list (loaded in chunks of up to 300). */
+const FB_PAGE_SAFETY_LIMIT = 20000;
+
 const EMPTY = { location_name: '', facebook_page_id: '', location_number: '', city: '', base_url: '', phone: '', ig_user_id: '', ig_username: '' };
 
 const IG_ID_HINT = 'Optional, needed for Instagram posts: the numeric Instagram business account ID linked to this page (Meta Business Suite → Settings → Instagram accounts, or Graph API {page-id}?fields=instagram_business_account).';
@@ -60,6 +63,12 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   const [fbPages, setFbPages] = useState<FbPage[]>([]);
   const [fbSelected, setFbSelected] = useState<string[]>([]);
   const [fbLoading, setFbLoading] = useState(false);
+  // Pages arrive in chunks (no fixed limit): the first chunk shows at once, the rest keep loading
+  const [fbLoadingMore, setFbLoadingMore] = useState(false);
+  const [fbResumeAfter, setFbResumeAfter] = useState<string | null>(null);
+  const fbLoadRun = useRef(0);
+  const [fbSearch, setFbSearch] = useState('');
+  const [fbHideAdded, setFbHideAdded] = useState(false);
   const [filter, setFilter] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   // LinkedIn / X
@@ -114,18 +123,64 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
     if (c.ok) setClients(((await c.json()).clients || []).map((x: any) => ({ id: x.id, name: x.name })));
   }, []);
 
+  // Leaving the Pages tab cancels any page list still loading in the background
+  useEffect(() => () => { fbLoadRun.current++; }, []);
+
+  /** Keeps requesting chunks from `after` until Facebook has no more pages (or the run is cancelled). */
+  const loadMoreFacebookPages = useCallback(async (run: number, startAfter: string) => {
+    let after: string | null = startAfter;
+    let total = 0;
+    setFbLoadingMore(true);
+    setFbResumeAfter(null);
+    try {
+      while (after && fbLoadRun.current === run && total < FB_PAGE_SAFETY_LIMIT) {
+        let data: { pages?: FbPage[]; next_after?: string | null; error?: string } = {};
+        try {
+          const res: Response = await fetch(`/api/facebook/pages?after=${encodeURIComponent(after)}`, { cache: 'no-store' });
+          data = await res.json().catch(() => ({ error: 'Unexpected response' }));
+        } catch {
+          data = { error: 'Network error' };
+        }
+        if (fbLoadRun.current !== run) return;
+        if (data.error) {
+          setFbResumeAfter(after);
+          setMessage({ kind: 'error', text: `${data.error} The pages loaded so far are listed; use "Load the rest" to continue.` });
+          return;
+        }
+        const batch: FbPage[] = Array.isArray(data.pages) ? data.pages : [];
+        total += batch.length;
+        setFbPages((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          return [...prev, ...batch.filter((p) => !seen.has(p.id))];
+        });
+        after = typeof data.next_after === 'string' ? data.next_after : null;
+      }
+      if (after && total >= FB_PAGE_SAFETY_LIMIT && fbLoadRun.current === run) {
+        setMessage({ kind: 'error', text: `Stopped after ${FB_PAGE_SAFETY_LIMIT.toLocaleString()} more pages. Use search to find pages, or add one manually by its page ID.` });
+      }
+    } finally {
+      if (fbLoadRun.current === run) setFbLoadingMore(false);
+    }
+  }, []);
+
   const loadFacebookPages = useCallback(async () => {
+    const run = ++fbLoadRun.current;
     setFbLoading(true);
+    setFbResumeAfter(null);
+    let nextAfter: string | null = null;
     try {
       const res = await fetch('/api/facebook/pages', { cache: 'no-store' });
       const data = await res.json();
+      if (fbLoadRun.current !== run) return;
       if (data.error) setMessage({ kind: 'error', text: data.error });
       setFbPages(data.connected ? data.pages : []);
       if (data.connected) setMode('facebook');
+      nextAfter = data.connected && typeof data.next_after === 'string' ? data.next_after : null;
     } finally {
-      setFbLoading(false);
+      if (fbLoadRun.current === run) setFbLoading(false);
     }
-  }, []);
+    if (nextAfter) void loadMoreFacebookPages(run, nextAfter);
+  }, [loadMoreFacebookPages]);
 
   // Coming back from Facebook Login: /?tab=pages&fb=<flag>
   useEffect(() => {
@@ -148,15 +203,15 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
     if (flag) {
       if (flag === 'publish_connected') {
         const saved = Number(params.get('saved') || 0);
-        const skipped = Number(params.get('skipped') || 0);
+        const unmanaged = Number(params.get('unmanaged') || 0);
         setMessage({
           kind: saved > 0 ? 'ok' : 'error',
           text: saved > 0
-            ? `Connected ${saved} page(s) for app publishing.${skipped ? ` ${skipped} other page(s) on that Facebook account aren't on this tab, so they were skipped.` : ''} An admin can now set them to publish from the app below.`
-            : 'No pages were connected: none of the pages on that Facebook account are on this tab yet. Add them first, then connect again.',
+            ? `Connected ${saved} page(s) for app publishing.${unmanaged ? ` ${unmanaged} page(s) on this tab aren't managed by that Facebook login, so they weren't connected.` : ''} An admin can now set them to publish from the app below.`
+            : 'No pages were connected: that Facebook login doesn\'t manage any of the pages on this tab. Add its pages first, or connect with a login that manages them.',
         });
         params.delete('saved');
-        params.delete('skipped');
+        params.delete('unmanaged');
       } else {
         setMessage(FB_FLAG_MESSAGES[flag] || null);
       }
@@ -201,15 +256,35 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
   const importFacebook = async () => {
     const chosen = fbPages.filter((p) => fbSelected.includes(p.id));
     const ok = await submit(chosen.map((p) => ({ facebook_page_id: p.id, location_name: p.name })), 'facebook');
-    if (ok) { setFbPages([]); setFbSelected([]); setMode('none'); }
+    if (ok) { fbLoadRun.current++; setFbLoadingMore(false); setFbResumeAfter(null); setFbPages([]); setFbSelected([]); setFbSearch(''); setMode('none'); }
   };
 
   const disconnect = async () => {
     await fetch('/api/facebook/pages', { method: 'DELETE' });
-    setFbPages([]); setFbSelected([]); setMode('none');
+    fbLoadRun.current++; setFbLoadingMore(false); setFbResumeAfter(null);
+    setFbPages([]); setFbSelected([]); setFbSearch(''); setMode('none');
   };
 
   const importable = fbPages.filter((p) => !p.already_added);
+
+  // Search the Facebook page list (can be hundreds of pages): every word must match the name, page ID or location
+  const fbVisible = useMemo(() => {
+    const words = fbSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return fbPages
+      .filter((p) => !(fbHideAdded && p.already_added))
+      .filter((p) => {
+        if (words.length === 0) return true;
+        const hay = `${p.name} ${p.id} ${p.location || ''}`.toLowerCase();
+        return words.every((w) => hay.includes(w));
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  }, [fbPages, fbSearch, fbHideAdded]);
+  const visibleImportableIds = fbVisible.filter((p) => !p.already_added).map((p) => p.id);
+  const allVisibleSelected = visibleImportableIds.length > 0 && visibleImportableIds.every((id) => fbSelected.includes(id));
+  const toggleVisible = () => {
+    if (allVisibleSelected) setFbSelected(fbSelected.filter((id) => !visibleImportableIds.includes(id)));
+    else setFbSelected(Array.from(new Set([...fbSelected, ...visibleImportableIds])));
+  };
 
   const afterMappingSaved = async () => { await load(); onPagesChanged(); };
   const appPublishingOn = !!socialStatus?.facebook_app.enabled;
@@ -305,18 +380,51 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
           <div className="border rounded-lg">
             <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b bg-gray-50 text-sm">
               <span className="font-medium text-gray-800 mr-auto">
-                {fbLoading ? 'Loading your Facebook pages…' : `${fbPages.length} page(s) on your Facebook account · ${importable.length} not yet added`}
+                {fbLoading
+                  ? 'Loading your Facebook pages…'
+                  : `${fbPages.length.toLocaleString()} page(s) ${fbLoadingMore ? 'loaded so far…' : 'on your Facebook account'} · ${importable.length.toLocaleString()} not yet added`}
+                {fbLoadingMore && <span className="ml-2 text-xs font-normal text-gray-500" aria-live="polite">(still loading — search already works on what&apos;s loaded)</span>}
+                {fbResumeAfter && !fbLoadingMore && (
+                  <button onClick={() => { const run = ++fbLoadRun.current; void loadMoreFacebookPages(run, fbResumeAfter); }}
+                    className="ml-2 text-xs font-normal text-blue-600 hover:underline">
+                    Load the rest
+                  </button>
+                )}
               </span>
-              {importable.length > 0 && (
-                <button onClick={() => setFbSelected(fbSelected.length === importable.length ? [] : importable.map((p) => p.id))}
-                  className="text-blue-600 hover:underline">
-                  {fbSelected.length === importable.length ? 'Select none' : 'Select all'}
-                </button>
-              )}
               <button onClick={disconnect} className="text-gray-500 hover:underline">Disconnect</button>
             </div>
+            {fbPages.length > 0 && (
+              <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b text-sm">
+                <input type="search" value={fbSearch} autoFocus
+                  onChange={(e) => setFbSearch(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Escape') setFbSearch(''); }}
+                  placeholder="Search by page name, page ID, city or state…"
+                  aria-label="Search your Facebook pages"
+                  className="flex-1 min-w-[220px] border border-gray-300 rounded-lg px-3 py-1.5" />
+                <label className="flex items-center gap-1.5 text-gray-600">
+                  <input type="checkbox" checked={fbHideAdded} onChange={(e) => setFbHideAdded(e.target.checked)} className="w-4 h-4" />
+                  Hide pages already added
+                </label>
+                <span className="text-gray-500" aria-live="polite">
+                  Showing {fbVisible.length} of {fbPages.length}
+                </span>
+                {visibleImportableIds.length > 0 && (
+                  <button onClick={toggleVisible} className="text-blue-600 hover:underline">
+                    {allVisibleSelected
+                      ? `Unselect ${fbSearch.trim() ? 'shown' : 'all'}`
+                      : `Select ${fbSearch.trim() ? `all ${visibleImportableIds.length} shown` : 'all'}`}
+                  </button>
+                )}
+                {fbSelected.length > 0 && (
+                  <span className="text-gray-700">
+                    {fbSelected.length} selected
+                    <button onClick={() => setFbSelected([])} className="ml-2 text-gray-500 hover:underline">Clear</button>
+                  </span>
+                )}
+              </div>
+            )}
             <ul className="max-h-80 overflow-auto divide-y">
-              {fbPages.map((p) => (
+              {fbVisible.map((p) => (
                 <li key={p.id} className="flex items-center gap-3 px-3 py-2">
                   <input type="checkbox" disabled={p.already_added} checked={fbSelected.includes(p.id)}
                     onChange={(e) => setFbSelected(e.target.checked ? [...fbSelected, p.id] : fbSelected.filter((x) => x !== p.id))}
@@ -331,6 +439,12 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
                 </li>
               ))}
               {!fbLoading && fbPages.length === 0 && <li className="px-3 py-4 text-sm text-gray-500">No pages found on this Facebook account.</li>}
+              {!fbLoading && fbPages.length > 0 && fbVisible.length === 0 && (
+                <li className="px-3 py-4 text-sm text-gray-500">
+                  No pages match{fbSearch.trim() ? ` "${fbSearch.trim()}"` : ''}.
+                  {fbSearch.trim() && <button onClick={() => setFbSearch('')} className="ml-2 text-blue-600 hover:underline">Clear search</button>}
+                </li>
+              )}
             </ul>
             <div className="flex justify-end px-3 py-2 border-t">
               <button onClick={importFacebook} disabled={saving || fbSelected.length === 0}
