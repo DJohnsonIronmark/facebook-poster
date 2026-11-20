@@ -3,10 +3,13 @@ import { requireAuth } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { UUID_RE } from '@/lib/review/guards';
 import { mayUseFacebookWebhook } from '@/lib/instagram/release';
+import { facebookAppPublishingEnabled } from '@/lib/social/switches';
+import { claimAndPublishFacebook, type FacebookPostRow } from '@/lib/facebook/publish';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
-// POST - Publish a scheduled post now via the n8n webhook (service role for data access)
+// POST - Publish a scheduled post now (service role for data access): via the n8n webhook, or for
+// pages set to publish_via='app', directly with the page's own token.
 export async function POST(request: NextRequest) {
   const { error: authError } = await requireAuth();
   if (authError) return authError;
@@ -16,10 +19,6 @@ export async function POST(request: NextRequest) {
     if (!post_id || !UUID_RE.test(String(post_id))) {
       return NextResponse.json({ error: 'Valid post ID is required' }, { status: 400 });
     }
-    if (!N8N_WEBHOOK_URL) {
-      return NextResponse.json({ error: 'n8n webhook URL not configured' }, { status: 500 });
-    }
-
     const supabase = createServiceClient();
     const { data: post, error: fetchErr } = await supabase
       .from('facebook_scheduled_posts').select('*').eq('id', post_id).maybeSingle();
@@ -44,6 +43,24 @@ export async function POST(request: NextRequest) {
     }
     if (!mayUseFacebookWebhook(post)) {
       return NextResponse.json({ error: 'Instagram posts cannot be published from here; they publish at their scheduled time.' }, { status: 409 });
+    }
+
+    // Pages set to app publishing: publish here with the page's own token; never the n8n webhook
+    if (post.publish_via === 'app') {
+      if (!facebookAppPublishingEnabled()) {
+        return NextResponse.json(
+          { error: 'This page is set to publish from the app, but app publishing is turned off (FACEBOOK_APP_PUBLISHING_ENABLED). Switch the page back to n8n on the Pages tab, or turn app publishing on.' },
+          { status: 409 }
+        );
+      }
+      const result = await claimAndPublishFacebook(supabase, post as FacebookPostRow);
+      if (result.status === 'published') return NextResponse.json({ success: true, message: 'Post published successfully' });
+      if (result.status === 'skipped') return NextResponse.json({ error: result.reason }, { status: 409 });
+      return NextResponse.json({ error: result.error }, { status: 502 });
+    }
+
+    if (!N8N_WEBHOOK_URL) {
+      return NextResponse.json({ error: 'n8n webhook URL not configured' }, { status: 500 });
     }
 
     const webhookPayload = {

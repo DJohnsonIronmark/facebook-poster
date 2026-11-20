@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { socialTokenKeyConfigured } from './crypto';
-import { publishingSwitches } from './switches';
+import { facebookAppPublishingEnabled, publishingSwitches } from './switches';
 import { X_IMAGE_MAX_BYTES, socialMediaProblem, validateLinkedInText, validateXText } from './rules';
 import { linkedinConfigured } from '@/lib/linkedin/api';
 import { xConfigured } from '@/lib/x/api';
@@ -16,6 +16,7 @@ export const isSocialPlatform = (p: unknown): p is SocialPlatform => p === 'link
 export function socialStatus() {
   const s = publishingSwitches();
   return {
+    facebook_app: { enabled: facebookAppPublishingEnabled() },
     instagram: { enabled: s.instagram },
     linkedin: { enabled: s.linkedin, configured: linkedinConfigured() },
     x: { enabled: s.x, configured: xConfigured() },

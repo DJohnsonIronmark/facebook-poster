@@ -7,7 +7,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "10 * * * *"
+              "expression": "*/15 * * * *"
             }
           ]
         }
@@ -19,7 +19,7 @@
         300
       ],
       "id": "6f1c2a4e-7d3b-4c8e-9a51-2b0e8d4f7c10",
-      "name": "Hourly at :10"
+      "name": "Every 15 minutes"
     },
     {
       "parameters": {
@@ -48,7 +48,7 @@
     }
   ],
   "connections": {
-    "Hourly at :10": {
+    "Every 15 minutes": {
       "main": [
         [
           {

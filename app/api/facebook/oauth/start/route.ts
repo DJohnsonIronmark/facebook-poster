@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireRole } from '@/lib/auth';
 import { GRAPH_VERSION, STATE_COOKIE, cookieOptions, facebookConfigured, newState, redirectUri } from '@/lib/facebook/oauth';
-import { INBOX_SCOPES, inboxEnabled } from '@/lib/inbox/server';
+import { pageConnectEnabled, pageConnectScopes, type ConnectPurpose } from '@/lib/facebook/publish';
 
 // GET - start "Connect with Facebook" (admin/manager). Redirects to the Facebook Login dialog.
-//   ?purpose=inbox → also asks for comment/message permissions and stores each page's token
-//   (encrypted) for the community inbox. Only while COMMUNITY_INBOX_ENABLED is on.
+//   ?purpose=inbox   → stores each page's token (encrypted) for the community inbox (COMMUNITY_INBOX_ENABLED)
+//   ?purpose=publish → stores each page's token for app publishing (FACEBOOK_APP_PUBLISHING_ENABLED)
+// Either way the login asks for every permission currently switched on (one token per page).
 export async function GET(request: NextRequest) {
   const { error: authError } = await requireRole(['admin', 'manager']);
   if (authError) return authError;
@@ -15,23 +16,25 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(new URL('/?tab=pages&fb=not_configured', origin));
   }
 
-  const inbox = new URL(request.url).searchParams.get('purpose') === 'inbox';
-  if (inbox && !inboxEnabled()) {
-    return NextResponse.redirect(new URL('/?tab=inbox&fb=inbox_off', origin));
+  const raw = new URL(request.url).searchParams.get('purpose');
+  const purpose: ConnectPurpose | null = raw === 'inbox' || raw === 'publish' ? raw : null;
+  if (purpose && !pageConnectEnabled(purpose)) {
+    return NextResponse.redirect(new URL(purpose === 'inbox' ? '/?tab=inbox&fb=inbox_off' : '/?tab=pages&fb=publish_off', origin));
   }
   // The purpose rides in the state, which must match the httpOnly cookie on the way back
-  const state = inbox ? `inbox.${newState()}` : newState();
+  const state = purpose ? `${purpose}.${newState()}` : newState();
   const dialog = new URL(`https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`);
   dialog.searchParams.set('client_id', process.env.FACEBOOK_APP_ID!);
   dialog.searchParams.set('redirect_uri', redirectUri(origin));
   dialog.searchParams.set('state', state);
   dialog.searchParams.set('response_type', 'code');
-  // Default: list pages only. Inbox: comment/message permissions (see INBOX_SCOPES).
+  // Default: list pages only. Connect pages: inbox and/or publishing permissions (pageConnectScopes).
   // Meta "Business" type apps use Facebook Login for Business, which takes a configuration id
-  // (set up in the Meta app with the same permissions) instead of a scope list.
-  const inboxConfigId = (process.env.FACEBOOK_INBOX_CONFIG_ID || '').trim();
-  if (inbox && /^\d{5,25}$/.test(inboxConfigId)) dialog.searchParams.set('config_id', inboxConfigId);
-  else dialog.searchParams.set('scope', inbox ? INBOX_SCOPES.join(',') : 'pages_show_list');
+  // (set up in the Meta app with the same permissions, incl. pages_manage_posts when publishing)
+  // instead of a scope list.
+  const configId = (process.env.FACEBOOK_INBOX_CONFIG_ID || '').trim();
+  if (purpose && /^\d{5,25}$/.test(configId)) dialog.searchParams.set('config_id', configId);
+  else dialog.searchParams.set('scope', purpose ? pageConnectScopes().join(',') : 'pages_show_list');
 
   const res = NextResponse.redirect(dialog);
   res.cookies.set(STATE_COOKIE, state, cookieOptions(10 * 60));

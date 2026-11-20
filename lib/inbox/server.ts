@@ -48,7 +48,7 @@ function appSecretProof(token: string): string | null {
 
 /** One Graph call. GET params go in the query string; POST params in a form body. */
 export async function graph(
-  path: string, token: string, params: Record<string, string> = {}, method: 'GET' | 'POST' = 'GET',
+  path: string, token: string, params: Record<string, string> = {}, method: 'GET' | 'POST' = 'GET', timeoutMs = 20000,
 ): Promise<any> {
   const url = new URL(`${GRAPH}/${path.replace(/^\//, '')}`);
   const all: Record<string, string> = { ...params, access_token: token };
@@ -57,13 +57,13 @@ export async function graph(
   let res: Response;
   if (method === 'GET') {
     for (const [k, v] of Object.entries(all)) url.searchParams.set(k, v);
-    res = await fetch(url, { signal: AbortSignal.timeout(20000), cache: 'no-store' });
+    res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), cache: 'no-store' });
   } else {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(all).toString(),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(timeoutMs),
       cache: 'no-store',
     });
   }
@@ -189,7 +189,7 @@ export async function listConnectedPages(supabase: SupabaseClient): Promise<Conn
   return (data || []).map((r: any) => ({ ...r, scopes: String(r.scopes || '').split(',').filter(Boolean) }));
 }
 
-async function pageToken(supabase: SupabaseClient, facebookPageId: string): Promise<{ token: string; page: ConnectedPage } | null> {
+export async function pageToken(supabase: SupabaseClient, facebookPageId: string): Promise<{ token: string; page: ConnectedPage } | null> {
   const { data } = await supabase.from('fb_page_tokens').select(`${TOKEN_COLUMNS}, access_token_enc`).eq('facebook_page_id', facebookPageId).maybeSingle();
   if (!data || data.status !== 'active') return null;
   const token = decryptToken(data.access_token_enc, pageAad(facebookPageId));
@@ -199,7 +199,7 @@ async function pageToken(supabase: SupabaseClient, facebookPageId: string): Prom
   return { token, page: { ...rest, scopes: String(rest.scopes || '').split(',').filter(Boolean) } as ConnectedPage };
 }
 
-async function markNeedsReauth(supabase: SupabaseClient, facebookPageId: string, message: string) {
+export async function markNeedsReauth(supabase: SupabaseClient, facebookPageId: string, message: string) {
   await supabase.from('fb_page_tokens')
     .update({ status: 'needs_reauth', last_error: message.slice(0, 300), updated_at: new Date().toISOString() })
     .eq('facebook_page_id', facebookPageId);
