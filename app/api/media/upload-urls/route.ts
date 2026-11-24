@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth, requireRole } from '@/lib/auth';
+import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { validateMediaFile } from '@/lib/media/mapping';
 import { DRAFTS_BUCKET, draftPathFor, formatStorageRef } from '@/lib/media/storageRef';
@@ -20,8 +20,8 @@ export async function POST(request: NextRequest) {
   const purpose = body?.purpose === 'draft' ? 'draft' : body?.purpose === 'direct' ? 'direct' : null;
   if (!purpose) return NextResponse.json({ error: "purpose must be 'draft' or 'direct'" }, { status: 400 });
 
-  // Approval-workflow drafts follow /api/review/drafts (admin/manager); direct posts follow /api/posts
-  const { error: authError } = purpose === 'draft' ? await requireRole(['admin', 'manager']) : await requireAuth();
+  // Drafts and direct posts both need admin/manager (viewers are Internal View Only)
+  const { error: authError } = await requireRole(['admin', 'manager']);
   if (authError) return authError;
 
   const files: unknown[] = Array.isArray(body?.files) ? body.files : [];

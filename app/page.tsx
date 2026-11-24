@@ -63,6 +63,11 @@ export default function Home() {
   const supabase = createClient();
   const { role, user } = useAuth();
 
+  // Internal View Only (viewer) accounts can't create posts: start them on Approvals
+  useEffect(() => {
+    if (role === 'viewer') setActiveTab((t) => (t === 'create' ? 'approvals' : t));
+  }, [role]);
+
   // Deep link from notification emails: /?tab=approvals
   useEffect(() => {
     const tab = new URLSearchParams(window.location.search).get('tab');
@@ -192,6 +197,7 @@ export default function Home() {
       <div className="max-w-5xl mx-auto px-4 mt-6">
         <div className="border-b border-gray-200">
           <nav className="-mb-px flex space-x-6">
+            {role !== 'viewer' && (
             <button
               onClick={() => setActiveTab('create')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
@@ -202,6 +208,7 @@ export default function Home() {
             >
               Create Post
             </button>
+            )}
             <button
               onClick={() => setActiveTab('approvals')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
@@ -282,7 +289,7 @@ export default function Home() {
 
       {/* Content */}
       <main className="max-w-5xl mx-auto px-4 py-8">
-        {activeTab === 'create' && (
+        {activeTab === 'create' && role !== 'viewer' && (
           <PostForm pages={pages} onPostCreated={handlePostCreated} />
         )}
         {activeTab === 'pages' && (role === 'admin' || role === 'manager') && (
@@ -327,6 +334,7 @@ export default function Home() {
             showPublishButton={true}
             onPostDeleted={handlePostDeleted}
             onPostPublished={handlePostPublished}
+            canEdit={role !== 'viewer'}
           />
         )}
         {activeTab === 'published' && (
@@ -344,6 +352,7 @@ export default function Home() {
               showPublishButton={false}
               onPostDeleted={handlePostDeleted}
               onPostPublished={handlePostPublished}
+            canEdit={role !== 'viewer'}
             />
             {filteredPublishedPosts.length !== publishedPosts.length && (
               <p className="text-sm text-gray-500 mt-2 text-center">

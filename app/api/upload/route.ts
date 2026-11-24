@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 
 export async function POST(request: NextRequest) {
-  const { error: authError } = await requireAuth();
+  // Viewers are Internal View Only: they can see posts but not create, delete or publish them
+  const { error: authError } = await requireRole(['admin', 'manager']);
   if (authError) return authError;
 
   try {

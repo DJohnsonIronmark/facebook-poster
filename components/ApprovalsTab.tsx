@@ -50,7 +50,7 @@ const STAGES: { key: Stage; label: string; hint: string }[] = [
 const FINAL_HEADERS = ['post_id', 'platform', 'client', 'location_number', 'location_name', 'post_content', 'link_url', 'media_url', 'scheduled_for', 'client_comment'];
 
 interface Props {
-  canEdit: boolean;   // admin/manager
+  canEdit: boolean;   // admin/manager (viewers are Internal View Only; they may only approve their own clients' drafts)
   isAdmin: boolean;
   userEmail: string | null;
   onScheduled: () => void;
@@ -381,7 +381,8 @@ function BatchCard({
           </div>
         </button>
 
-        {canEdit && (
+        {/* Internal View Only (viewer) accounts see actions only to approve their own clients' drafts */}
+        {(canEdit || (isAccountManager && batch.status === 'internal_review')) && (
           <div className="flex flex-wrap items-center gap-2">
             {confirm ? (
               <>
@@ -433,7 +434,9 @@ function BatchCard({
                     Schedule {releasable.length} post{releasable.length === 1 ? '' : 's'}
                   </button>
                 )}
-                <button onClick={() => setConfirm('cancel')} className="px-3 py-1.5 text-sm rounded-lg bg-red-50 text-red-700 hover:bg-red-100">Cancel</button>
+                {canEdit && (
+                  <button onClick={() => setConfirm('cancel')} className="px-3 py-1.5 text-sm rounded-lg bg-red-50 text-red-700 hover:bg-red-100">Cancel</button>
+                )}
               </>
             )}
           </div>

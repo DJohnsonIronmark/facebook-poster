@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { replacePlaceholders } from '@/lib/placeholders';
 import { UUID_RE, pageRequiresApproval } from '@/lib/review/guards';
@@ -48,7 +48,8 @@ export async function GET() {
 
 // POST - Create a new post
 export async function POST(request: NextRequest) {
-  const { error: authError } = await requireAuth();
+  // Viewers are Internal View Only: they can see posts but not create, delete or publish them
+  const { error: authError } = await requireRole(['admin', 'manager']);
   if (authError) return authError;
 
   try {
@@ -229,7 +230,8 @@ export async function POST(request: NextRequest) {
 
 // DELETE - Delete a post
 export async function DELETE(request: NextRequest) {
-  const { error: authError } = await requireAuth();
+  // Viewers are Internal View Only: they can see posts but not create, delete or publish them
+  const { error: authError } = await requireRole(['admin', 'manager']);
   if (authError) return authError;
 
   const postId = new URL(request.url).searchParams.get('id');
