@@ -144,7 +144,7 @@ export function SocialAccountsPanel({ status, connections, isAdmin, loading, onC
 
       <p className="text-xs text-gray-500 bg-amber-50 border border-amber-100 rounded px-3 py-2">
         LinkedIn sign-in lasts 60 days unless LinkedIn approves refresh tokens; reconnect when it expires. While publishing is off,
-        LinkedIn and X posts can still be drafted and approved; they are held back when the batch is scheduled.
+        LinkedIn and X posts can still be drafted and approved; they are held back when the campaign is scheduled.
       </p>
 
       {error && <p className="text-sm text-red-700" role="status">{error}</p>}

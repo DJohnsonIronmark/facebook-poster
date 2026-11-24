@@ -65,8 +65,8 @@ async function submitDrafts(rows: DraftPayload[], opts: DraftBatchOptions): Prom
   const batches: { client: string; posts: number; email: string; joined?: boolean; batch_name?: string; batch_posts?: number }[] = data.batches || [];
   const parts = batches.map((b) => {
     const where = b.joined
-      ? `added ${b.posts} draft(s) to open batch "${b.batch_name}" (now ${b.batch_posts ?? b.posts})`
-      : `${b.posts} draft(s) in new batch "${b.batch_name || b.client}"`;
+      ? `added ${b.posts} draft(s) to open campaign "${b.batch_name}" (now ${b.batch_posts ?? b.posts})`
+      : `${b.posts} draft(s) in new campaign "${b.batch_name || b.client}"`;
     return `${b.client}: ${where}${b.email === 'sent' ? ', team notified' : ' (notification email not sent)'}`;
   });
   const skipped: { row: number; reason: string }[] = data.skipped || [];
@@ -609,7 +609,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const batchOptions = (
     <div className="mt-2 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
       <label className="flex items-center gap-2">
-        <span className="whitespace-nowrap">Batch name (optional)</span>
+        <span className="whitespace-nowrap">Campaign name (optional)</span>
         <input
           type="text"
           value={draftBatchName}
@@ -622,12 +622,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       </label>
       <label className="flex items-center gap-2">
         <input type="checkbox" checked={startNewBatch} onChange={(e) => setStartNewBatch(e.target.checked)} disabled={submitting} />
-        <span>Start a new review batch</span>
+        <span>Start a new campaign</span>
       </label>
       <span className="text-xs text-blue-800">
         {startNewBatch
-          ? 'These drafts get their own batch and review link.'
-          : 'Added to the client\'s open batch if one is still in internal review (one review link); otherwise a new batch. The name only applies to a new batch.'}
+          ? 'These drafts get their own campaign and review link.'
+          : 'Added to the client\'s open campaign if one is still in internal review (one review link); otherwise a new campaign. The name only applies to a new campaign.'}
       </span>
     </div>
   );
@@ -2007,7 +2007,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 mb-3 text-sm text-blue-900">
                       <span>
                         <strong>Client approval workflow</strong>: {bulkApprovalCount} of {csvData.length} row(s) are for clients that require review.
-                        They&apos;ll be grouped into one review batch per client and the internal team member on each client will be alerted.
+                        They&apos;ll be grouped into one campaign per client and the internal team member on each client will be alerted.
                       </span>
                       {batchOptions}
                     </div>
@@ -2233,12 +2233,12 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   Instagram: needs a photo or video and an Instagram account ID on the page (Pages tab); text-only posts aren&apos;t possible.
                   Photos are converted to JPEG (max 1440 px wide) and center-cropped to 4:5–1.91:1 when needed; the Facebook post keeps the
                   original. Videos: MP4/MOV, 3 s to 15 min, 9:16 recommended. Links in captions are not clickable; more than 5 hashtags gets a warning.
-                  {!igEnabled && ' Instagram publishing is not enabled yet: Instagram posts go through client approval but are held back when the batch is scheduled.'}
+                  {!igEnabled && ' Instagram publishing is not enabled yet: Instagram posts go through client approval but are held back when the campaign is scheduled.'}
                 </p>
                 <p className="text-sm text-gray-500 mt-1">
                   LinkedIn and X: the page needs a LinkedIn company page / X account set on the Pages tab. Both use the original photo or video
                   (LinkedIn: JPG/PNG/GIF or MP4; X: JPG/PNG/GIF/WEBP up to 5 MB or MP4). X posts with a link cost more (about $0.20 vs $0.015).
-                  {bulkSocialOff.length > 0 && ` ${bulkSocialOff.map((sp) => PLATFORM_LABEL[sp]).join(' and ')} publishing is not enabled yet: those posts go through client approval but are held back when the batch is scheduled.`}
+                  {bulkSocialOff.length > 0 && ` ${bulkSocialOff.map((sp) => PLATFORM_LABEL[sp]).join(' and ')} publishing is not enabled yet: those posts go through client approval but are held back when the campaign is scheduled.`}
                 </p>
                 <p className="text-sm text-gray-500 mt-1">
                   Non-franchise pages (e.g. IANA): leave location_number blank and enter the page name exactly as it appears on the Pages tab.

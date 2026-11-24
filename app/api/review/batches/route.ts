@@ -29,7 +29,7 @@ export async function GET(request: NextRequest) {
   const { data, error } = await query;
   if (error) {
     console.error('batches GET', error);
-    return NextResponse.json({ error: 'Failed to load review batches' }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to load campaigns' }, { status: 500 });
   }
   // Attach review history: original draft text + whether the client changed the copy
   const postIds = (data || []).flatMap((b: any) => (b.posts || []).map((p: any) => p.id));

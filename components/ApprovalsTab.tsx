@@ -143,7 +143,7 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
     const problems: string[] = [];
     rows.forEach((r, i) => {
       const b = batchOfPost.get(r.post_id);
-      if (!b) { problems.push(`Row ${i + 2}: post ${r.post_id || '(blank)'} is not in a client-approved batch`); return; }
+      if (!b) { problems.push(`Row ${i + 2}: post ${r.post_id || '(blank)'} is not in a client-approved campaign`); return; }
       const scheduled = r.scheduled_for ? parseScheduledDate(r.scheduled_for) : undefined;
       if (r.scheduled_for && !scheduled) { problems.push(`Row ${i + 2}: can't read date "${r.scheduled_for}"`); return; }
       const g = grouped.get(b.id) || { batch: b, rows: [] };
@@ -335,8 +335,8 @@ function BatchCard({
     schedule: `Schedule ${releasable.length} post(s) for ${batch.client?.name}? They will publish at their scheduled times.`
       + (waiting.length ? ` ${waitingSentence}; ${waiting.length === 1 ? 'it stays' : 'they stay'} here.` : ''),
     cancel: alreadyScheduled
-      ? `Cancel this batch? Its ${approved.length} unscheduled post(s) will never publish. ${alreadyScheduled} post(s) already scheduled will still publish (delete them from the Scheduled tab).`
-      : 'Cancel this batch? Its posts will never publish and the client link stops working.',
+      ? `Cancel this campaign? Its ${approved.length} unscheduled post(s) will never publish. ${alreadyScheduled} post(s) already scheduled will still publish (delete them from the Scheduled tab).`
+      : 'Cancel this campaign? Its posts will never publish and the client link stops working.',
   };
 
   return (
@@ -625,7 +625,7 @@ function PostReviewCard({ post, device, editable, onChanged }: {
             <div className="flex gap-2 justify-end">
               {confirmRemove ? (
                 <>
-                  <span className="text-gray-600 mr-auto">Remove this post from the batch?</span>
+                  <span className="text-gray-600 mr-auto">Remove this post from the campaign?</span>
                   <button onClick={() => setConfirmRemove(false)} className="px-3 py-1 rounded-lg border">No</button>
                   <button onClick={remove} className="px-3 py-1 rounded-lg bg-red-600 text-white">Remove</button>
                 </>

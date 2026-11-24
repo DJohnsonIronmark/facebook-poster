@@ -104,13 +104,13 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       if (!seen) return err('Refresh the page and approve again (this screen is out of date).', 409);
       const unseen = pendingIds.filter((id) => !seen.has(id));
       if (unseen.length > 0) {
-        return err(`${unseen.length} new draft${unseen.length === 1 ? ' was' : 's were'} added to this batch since you opened it. Refresh to review ${unseen.length === 1 ? 'it' : 'them'}, then approve.`, 409);
+        return err(`${unseen.length} new draft${unseen.length === 1 ? ' was' : 's were'} added to this campaign since you opened it. Refresh to review ${unseen.length === 1 ? 'it' : 'them'}, then approve.`, 409);
       }
       const approveIds = pendingIds.filter((id) => seen.has(id));
       if (approveIds.length === 0) return err('Batch has no drafts awaiting review');
 
       if (!(await claim(['internal_review'], { status: 'client_review', internal_approved_by_email: user.email, internal_approved_at: now }))) {
-        return err('Someone else already moved this batch. Refresh and try again.', 409);
+        return err('Someone else already moved this campaign. Refresh and try again.', 409);
       }
       // Only the approved ids: a draft inserted in the last instant stays internal_review, and the upload
       // route moves it to a fresh internal-review batch when it sees this batch has left internal review.
@@ -147,7 +147,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         const post = byId.get(String(row.post_id || ''));
-        if (!post) { problems.push(`Row ${i + 1}: post_id not in this batch`); continue; }
+        if (!post) { problems.push(`Row ${i + 1}: post_id not in this campaign`); continue; }
         if (post.status !== 'client_approved') { problems.push(`Row ${i + 1}: post is ${post.status}`); continue; }
 
         const patch: Record<string, unknown> = {};
@@ -278,7 +278,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       }
 
       if (!(await claim(['client_approved'], { status: 'scheduled', scheduled_by_email: user.email, scheduled_at: now, client_token_hash: null }))) {
-        return err('This batch was already scheduled or changed. Refresh and check.', 409);
+        return err('This campaign was already scheduled or changed. Refresh and check.', 409);
       }
 
       // Point each post at its public copy while it is still client_approved (never picked up by
