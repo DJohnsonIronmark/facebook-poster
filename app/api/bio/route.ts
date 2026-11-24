@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, filterByPage, noPageAccess, pageIdsForInstagram, requireScopedUser } from '@/lib/access';
 import { revalidatePath } from 'next/cache';
 import { requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
@@ -16,12 +17,15 @@ export async function GET() {
   if (authError) return authError;
 
   const supabase = createServiceClient();
-  const { data: pages, error } = await supabase
-    .from('facebook_pages').select('location_name, ig_user_id, ig_username').not('ig_user_id', 'is', null).order('location_name');
+  const { data: allPages, error } = await supabase
+    .from('facebook_pages').select('location_name, ig_user_id, ig_username, facebook_page_id').not('ig_user_id', 'is', null).order('location_name');
   if (error) {
     console.error('bio GET pages', error);
     return NextResponse.json({ error: 'Failed to load Instagram accounts' }, { status: 500 });
   }
+  const scoped = await requireScopedUser();
+  if (scoped.error) return scoped.error;
+  const pages = filterByPage(scoped.scope, (allPages || []) as { facebook_page_id: string; location_name: string; ig_user_id: string; ig_username: string | null }[]);
 
   const { data: settings, error: settingsErr } = await supabase.from('fb_bio_pages').select(BIO_COLUMNS);
   if (settingsErr) {
@@ -53,6 +57,12 @@ export async function PUT(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const igUserId = String(body?.ig_user_id ?? '').trim();
   if (!IG_USER_ID_RE.test(igUserId)) return NextResponse.json({ error: 'Invalid Instagram account' }, { status: 400 });
+  {
+    const scoped = await requireScopedUser(['admin', 'manager']);
+    if (scoped.error) return scoped.error;
+    const linked = await pageIdsForInstagram(scoped.supabase, igUserId);
+    if (!linked.some((id) => canSeePage(scoped.scope, id))) return noPageAccess();
+  }
   const slug = cleanBioSlug(body?.slug);
   if (!slug.ok) return NextResponse.json({ error: slug.error }, { status: 400 });
   const title = cleanBioTitle(body?.title);

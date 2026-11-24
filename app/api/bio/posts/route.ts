@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, noPageAccess, requireScopedUser, visiblePageIds } from '@/lib/access';
 import { revalidatePath } from 'next/cache';
 import { requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
@@ -21,7 +22,9 @@ export async function GET(request: NextRequest) {
   if (!IG_USER_ID_RE.test(igUserId)) return NextResponse.json({ error: 'Invalid Instagram account' }, { status: 400 });
 
   const supabase = createServiceClient();
-  const { ids } = await facebookPageIdsForIg(supabase, igUserId);
+  const scoped = await requireScopedUser();
+  if (scoped.error) return scoped.error;
+  const ids = visiblePageIds(scoped.scope, (await facebookPageIdsForIg(supabase, igUserId)).ids);
   if (ids.length === 0) return NextResponse.json({ posts: [] });
 
   const { data, error } = await supabase
@@ -61,6 +64,12 @@ export async function PATCH(request: NextRequest) {
   if (Object.keys(patch).length === 0) return NextResponse.json({ error: 'Nothing to change' }, { status: 400 });
 
   const supabase = createServiceClient();
+  {
+    const scoped = await requireScopedUser(['admin', 'manager']);
+    if (scoped.error) return scoped.error;
+    const { data: owner } = await supabase.from('facebook_scheduled_posts').select('facebook_page_id').eq('id', id).maybeSingle();
+    if (owner && !canSeePage(scoped.scope, String((owner as { facebook_page_id: string }).facebook_page_id))) return noPageAccess();
+  }
   const { data, error } = await supabase
     .from('facebook_scheduled_posts')
     .update(patch)

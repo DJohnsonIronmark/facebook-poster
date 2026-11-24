@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, filterByPage, noPageAccess, requireScopedUser, visiblePageIds } from '@/lib/access';
 import { getUserRole, requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { allowedSenderDomain, isAllowedSender, validEmails } from '@/lib/review/notify';
@@ -32,7 +33,9 @@ export async function GET() {
   const canSeeEmails = role === 'admin' || role === 'manager';
   const out = (clients.data || []).map((c: any) =>
     canSeeEmails ? c : { ...c, account_manager_email: null, client_reviewer_emails: [] });
-  return NextResponse.json({ clients: out, pages: pages.data });
+  const scoped = await requireScopedUser();
+  if (scoped.error) return scoped.error;
+  return NextResponse.json({ clients: out, pages: filterByPage(scoped.scope, (pages.data || []) as { facebook_page_id: string }[]) });
 }
 
 // POST - create a client (admin)

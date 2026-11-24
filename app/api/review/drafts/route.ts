@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, noPageAccess, requireScopedUser } from '@/lib/access';
 import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { replacePlaceholders } from '@/lib/placeholders';
@@ -128,6 +129,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Failed to load pages' }, { status: 500 });
   }
   const pageById = new Map<string, any>((pages || []).map((p: any) => [p.id, p]));
+  const scopedUser = await requireScopedUser(['admin', 'manager']);
+  if (scopedUser.error) return scopedUser.error;
+  const scope = scopedUser.scope;
   const connections = await loadConnectionsLite(supabase, (pages || []).flatMap((p: any) => [p.linkedin_connection_id, p.x_connection_id]));
 
   const skipped: { row: number; reason: string }[] = [];
@@ -138,6 +142,7 @@ export async function POST(request: NextRequest) {
     const page = pageById.get(String(row.page_id));
     const content = String(row.post_content || '').trim();
     if (!page) return skipped.push({ row: index + 1, reason: 'page not found' });
+    if (!canSeePage(scope, page.facebook_page_id)) return skipped.push({ row: index + 1, reason: "you don't have access to this page on Facebook" });
     if (!page.client?.approval_workflow_enabled) return skipped.push({ row: index + 1, reason: 'client not enabled for approval workflow' });
     if (!content) return skipped.push({ row: index + 1, reason: 'empty post content' });
     if (content.length > MAX_POST_LENGTH) return skipped.push({ row: index + 1, reason: 'post content too long' });

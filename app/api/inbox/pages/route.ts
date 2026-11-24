@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, noPageAccess, requireScopedUser } from '@/lib/access';
 import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 
@@ -13,6 +14,11 @@ export async function DELETE(request: NextRequest) {
 
   const id = new URL(request.url).searchParams.get('facebook_page_id') || '';
   if (!FB_PAGE_ID_RE.test(id)) return NextResponse.json({ error: 'Invalid page' }, { status: 400 });
+  {
+    const scoped = await requireScopedUser(['admin', 'manager']);
+    if (scoped.error) return scoped.error;
+    if (!canSeePage(scoped.scope, id)) return noPageAccess();
+  }
 
   const { error } = await createServiceClient().from('fb_page_tokens').delete().eq('facebook_page_id', id);
   if (error) {

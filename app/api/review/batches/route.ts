@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, requireScopedUser } from '@/lib/access';
 import { requireAuth } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { BATCH_PUBLIC_COLUMNS, POST_REVIEW_COLUMNS } from '@/lib/review/types';
@@ -11,8 +12,8 @@ const OPEN_STATUSES = ['internal_review', 'client_review', 'client_approved'];
 
 // GET - review batches with client + posts. ?include=all to also return scheduled/cancelled (last 60 days)
 export async function GET(request: NextRequest) {
-  const { error: authError } = await requireAuth();
-  if (authError) return authError;
+  const auth = await requireScopedUser();
+  if (auth.error) return auth.error;
 
   const includeAll = new URL(request.url).searchParams.get('include') === 'all';
   const supabase = createServiceClient();
@@ -26,11 +27,15 @@ export async function GET(request: NextRequest) {
     ? query.gte('created_at', new Date(Date.now() - 60 * 86400000).toISOString())
     : query.in('status', OPEN_STATUSES);
 
-  const { data, error } = await query;
+  const { data: allBatches, error } = await query;
   if (error) {
     console.error('batches GET', error);
     return NextResponse.json({ error: 'Failed to load campaigns' }, { status: 500 });
   }
+  // Only posts for pages this user can access on Facebook (admins: all); campaigns with none are hidden
+  const data = auth.scope.all ? allBatches : (allBatches || [])
+    .map((b: any) => ({ ...b, posts: (b.posts || []).filter((p: any) => canSeePage(auth.scope, p.facebook_page_id)) }))
+    .filter((b: any) => b.posts.length > 0);
   // Attach review history: original draft text + whether the client changed the copy
   const postIds = (data || []).flatMap((b: any) => (b.posts || []).map((p: any) => p.id));
   const history = new Map<string, { original: string | null; clientEdited: boolean }>();

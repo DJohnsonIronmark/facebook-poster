@@ -10,6 +10,7 @@ import PagesManager from '@/components/PagesManager';
 import ClientSettings from '@/components/ClientSettings';
 import PostCalendar from '@/components/PostCalendar';
 import AnalyticsTab from '@/components/AnalyticsTab';
+import AccessBanner from '@/components/AccessBanner';
 import LinkInBioTab from '@/components/LinkInBioTab';
 import InboxTab from '@/components/InboxTab';
 import { createClient } from '@/lib/supabase/client';
@@ -327,6 +328,8 @@ export default function Home() {
           </nav>
         </div>
       </div>
+
+      <AccessBanner />
 
       {/* Content */}
       <main className="max-w-5xl mx-auto px-4 py-8">

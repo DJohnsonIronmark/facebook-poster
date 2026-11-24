@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireRole } from '@/lib/auth';
+import { requireAuth, requireRole } from '@/lib/auth';
+import { verifyFacebookAccess } from '@/lib/access-verify';
 import {
   STATE_COOKIE, TOKEN_COOKIE, TOKEN_TTL_SECONDS, cookieOptions, exchangeCode, facebookConfigured, sealToken, statesMatch,
 } from '@/lib/facebook/oauth';
@@ -19,6 +20,33 @@ export async function GET(request: NextRequest) {
     res.cookies.set(STATE_COOKIE, '', cookieOptions(0));
     return res;
   };
+
+  // "Verify my page access" (any signed-in user): record which app pages this Facebook login manages
+  if ((url.searchParams.get('state') || '').startsWith('access.')) {
+    const accessBack = (flag: string, extra = '') => {
+      const res = NextResponse.redirect(new URL(`/?access=${flag}${extra}`, url.origin));
+      res.cookies.set(STATE_COOKIE, '', cookieOptions(0));
+      return res;
+    };
+    const { user: me, error: meErr } = await requireAuth();
+    if (meErr || !me) return accessBack('unauthorized');
+    if (!facebookConfigured()) return accessBack('not_configured');
+    if (!socialTokenKeyConfigured()) return accessBack('no_key');
+    if (!statesMatch(request.cookies.get(STATE_COOKIE)?.value, url.searchParams.get('state'))) return accessBack('state_mismatch');
+    if (url.searchParams.get('error')) return accessBack('denied');
+    const accessCode = url.searchParams.get('code');
+    if (!accessCode || accessCode.length > 2000) return accessBack('error');
+    const shortToken = await exchangeCode(accessCode, url.origin);
+    if (!shortToken) return accessBack('error');
+    try {
+      const longToken = await longLivedUserToken(shortToken);
+      const result = await verifyFacebookAccess(createServiceClient(), me.id, longToken);
+      return accessBack('verified', `&pages=${result.pages}`);
+    } catch (err) {
+      console.error('[access] verify failed', err instanceof Error ? err.message : err);
+      return accessBack('error');
+    }
+  }
 
   const { user, error: authError } = await requireRole(['admin', 'manager']);
   if (authError || !user) return back('unauthorized');

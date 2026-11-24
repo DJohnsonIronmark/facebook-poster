@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, filterByPage, noPageAccess, requireScopedUser, visiblePageIds } from '@/lib/access';
 
 // Instagram publishing waits for Instagram to process the media
 export const maxDuration = 300;
@@ -32,11 +33,11 @@ import {
 
 // GET - Fetch all posts
 export async function GET() {
-  const { error: authError } = await requireAuth();
-  if (authError) return authError;
+  const auth = await requireScopedUser();
+  if (auth.error) return auth.error;
 
-  const supabase = createServiceClient();
-  const { data, error } = await supabase
+  const supabase = auth.supabase;
+  const { data: allPosts, error } = await supabase
     .from('facebook_scheduled_posts')
     .select('*')
     .order('created_at', { ascending: false });
@@ -44,6 +45,8 @@ export async function GET() {
     console.error('posts GET', error);
     return NextResponse.json({ error: 'Failed to fetch posts' }, { status: 500 });
   }
+  // Only posts for pages this user can access on Facebook (admins: all)
+  const data = filterByPage(auth.scope, (allPosts || []) as { facebook_page_id: string }[]) as typeof allPosts;
   // Review-workflow posts still hold private draft media until scheduled
   await signPostMedia(supabase, data || []);
   await attachSocialIdentities(supabase, data || []);
@@ -62,6 +65,11 @@ export async function POST(request: NextRequest) {
 
     if (!facebook_page_id || !post_content) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+    }
+    {
+      const scoped = await requireScopedUser(['admin', 'manager']);
+      if (scoped.error) return scoped.error;
+      if (!canSeePage(scoped.scope, String(facebook_page_id))) return noPageAccess();
     }
 
     // Approval workflow is enforced server-side, not just in the form
@@ -217,6 +225,12 @@ export async function DELETE(request: NextRequest) {
   }
 
   const supabase = createServiceClient();
+  {
+    const scoped = await requireScopedUser(['admin', 'manager']);
+    if (scoped.error) return scoped.error;
+    const { data: owner } = await supabase.from('facebook_scheduled_posts').select('facebook_page_id').eq('id', postId).maybeSingle();
+    if (owner && !canSeePage(scoped.scope, String((owner as { facebook_page_id: string }).facebook_page_id))) return noPageAccess();
+  }
 
   // ?from_platform=1: delete the published post on Facebook / Instagram first; the app's record is
   // only removed once the platform has deleted it, so a refusal never leaves a live post untracked.

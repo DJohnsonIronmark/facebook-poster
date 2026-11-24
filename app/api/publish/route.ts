@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, filterByPage, noPageAccess, requireScopedUser, visiblePageIds } from '@/lib/access';
 import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { UUID_RE } from '@/lib/review/guards';
@@ -26,6 +27,11 @@ export async function POST(request: NextRequest) {
       .from('facebook_scheduled_posts').select('*').eq('id', post_id).maybeSingle();
     if (fetchErr) return NextResponse.json({ error: 'Failed to fetch post' }, { status: 500 });
     if (!post) return NextResponse.json({ error: 'Post not found' }, { status: 404 });
+    {
+      const scoped = await requireScopedUser(['admin', 'manager']);
+      if (scoped.error) return scoped.error;
+      if (!canSeePage(scoped.scope, String(post.facebook_page_id))) return noPageAccess();
+    }
 
     // Approval workflow: only posts already released to 'pending' can be published from here
     // (review posts move to 'pending' only via Approvals → Schedule).

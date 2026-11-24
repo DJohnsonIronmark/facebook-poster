@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, filterByPage, noPageAccess, requireScopedUser, visiblePageIds } from '@/lib/access';
 import { requireAuth } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { analyticsEnabled } from '@/lib/analytics/collect';
@@ -24,8 +25,8 @@ interface MetricRow {
 const add = (a: number, b: number | null) => a + (b || 0);
 
 export async function GET(request: NextRequest) {
-  const { error: authError } = await requireAuth();
-  if (authError) return authError;
+  const auth = await requireScopedUser();
+  if (auth.error) return auth.error;
 
   const q = new URL(request.url).searchParams;
   const today = new Date().toISOString().slice(0, 10);
@@ -46,6 +47,8 @@ export async function GET(request: NextRequest) {
     .filter((p) => (client === 'all' ? true : client === 'none' ? !p.client_id : p.client_id === client))
     .map((p) => String(p.facebook_page_id));
   if (page) pageIds = pageIds.filter((id) => id === page);
+  // Only pages this user can access on Facebook (admins: all)
+  pageIds = visiblePageIds(auth.scope, pageIds);
   if (pageIds.length === 0) {
     return NextResponse.json({ enabled: analyticsEnabled(), from, to, totals: null, series: [], top: [], followers: [], posts: [] });
   }
