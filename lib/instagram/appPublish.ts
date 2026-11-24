@@ -28,7 +28,8 @@ export interface InstagramPostRow {
   platform?: string | null;
 }
 
-export type InstagramPublishResult = { ok: true; mediaId: string } | { ok: false; error: string };
+// claimed: false = nothing was attempted (checks failed, or another run already has the row)
+export type InstagramPublishResult = { ok: true; mediaId: string } | { ok: false; error: string; claimed: boolean; alreadyClaimed?: boolean };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const POLL_EVERY_MS = 2500;
@@ -47,26 +48,26 @@ async function markFailed(supabase: SupabaseClient, postId: string, error: strin
  * the reason (shown in the post list).
  */
 export async function claimAndPublishInstagram(supabase: SupabaseClient, post: InstagramPostRow): Promise<InstagramPublishResult> {
-  if (post.platform !== 'instagram') return { ok: false, error: 'Not an Instagram post' };
-  if (!instagramAppPublishingEnabled()) return { ok: false, error: 'Instagram app publishing is switched off (INSTAGRAM_APP_PUBLISHING_ENABLED)' };
+  if (post.platform !== 'instagram') return { ok: false, error: 'Not an Instagram post', claimed: false };
+  if (!instagramAppPublishingEnabled()) return { ok: false, error: 'Instagram app publishing is switched off (INSTAGRAM_APP_PUBLISHING_ENABLED)', claimed: false };
   const kind = post.media_type === 'video' ? 'video' : post.media_type === 'photo' ? 'photo' : null;
-  if (!kind || !post.media_url) return { ok: false, error: 'Instagram posts need a photo or video' };
+  if (!kind || !post.media_url) return { ok: false, error: 'Instagram posts need a photo or video', claimed: false };
 
   // Everything that can be checked without touching Instagram, before claiming the row
   const { data: pageRows } = await supabase
     .from('facebook_pages').select('ig_user_id').eq('facebook_page_id', String(post.facebook_page_id));
   const igUserId = (pageRows || []).map((p: { ig_user_id: string | null }) => p.ig_user_id).find(Boolean);
-  if (!igUserId || !/^[0-9]{5,25}$/.test(igUserId)) return { ok: false, error: 'The page has no Instagram account ID (set it on the Pages tab)' };
+  if (!igUserId || !/^[0-9]{5,25}$/.test(igUserId)) return { ok: false, error: 'The page has no Instagram account ID (set it on the Pages tab)', claimed: false };
   const conn = await pageToken(supabase, String(post.facebook_page_id));
-  if (!conn) return { ok: false, error: 'The page isn\'t connected (or its connection expired). Use Inbox → "Connect pages", then try again.' };
+  if (!conn) return { ok: false, error: 'The page isn\'t connected (or its connection expired). Use Inbox → "Connect pages", then try again.', claimed: false };
   if (!conn.page.scopes.includes(IG_PUBLISH_PERMISSION)) {
-    return { ok: false, error: `The page's connection can't publish to Instagram yet (missing ${IG_PUBLISH_PERMISSION}). Use Inbox → "Connect pages" once to reconnect it.` };
+    return { ok: false, error: `The page's connection can't publish to Instagram yet (missing ${IG_PUBLISH_PERMISSION}). Use Inbox → "Connect pages" once to reconnect it.`, claimed: false };
   }
 
   const { data: claimed } = await supabase.from('facebook_scheduled_posts')
-    .update({ status: 'publishing', publish_error: null })
+    .update({ status: 'publishing', publish_started_at: new Date().toISOString(), publish_error: null })
     .eq('id', post.id).eq('status', 'pending').select('id');
-  if (!claimed || claimed.length === 0) return { ok: false, error: 'This post is already publishing or was published' };
+  if (!claimed || claimed.length === 0) return { ok: false, error: 'This post is already publishing or was published', claimed: false, alreadyClaimed: true };
 
   try {
     const caption = String(post.post_content || '');
@@ -99,6 +100,6 @@ export async function claimAndPublishInstagram(supabase: SupabaseClient, post: I
     if (e instanceof GraphError && e.tokenInvalid) await markNeedsReauth(supabase, String(post.facebook_page_id), e.message);
     const message = e instanceof Error ? e.message : 'Instagram publishing failed';
     await markFailed(supabase, post.id, message);
-    return { ok: false, error: message };
+    return { ok: false, error: message, claimed: true };
   }
 }

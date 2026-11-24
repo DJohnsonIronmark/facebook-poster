@@ -237,7 +237,7 @@ export default function PostList({
                   </a>
                 )}
                 {/* "Publish now" goes through the Facebook webhook; other platforms publish on schedule only */}
-                {canEdit && showPublishButton && (post.platform || 'facebook') === 'facebook' && post.status === 'pending' && (
+                {canEdit && showPublishButton && ((post.platform || 'facebook') === 'facebook' || post.platform === 'instagram') && post.status === 'pending' && (
                   <button
                     onClick={() => handlePublish(post)}
                     disabled={publishingId === post.id}
