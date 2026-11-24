@@ -85,6 +85,9 @@ interface CSVRow {
   media_url: string;
   platforms: string;
   ig_caption: string;
+  /** Instagram's own media (file name or URL); lets a Facebook link post carry a photo/video on Instagram */
+  ig_media_file: string;
+  ig_media_url: string;
   linkedin_text: string;
   x_text: string;
   bio_link: string;
@@ -636,17 +639,31 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   // Row ↔ file mapping (media_file column), recomputed as rows/files change
   const mediaMapping = useMemo(() => mapRowsToFiles(csvData, mediaFiles), [csvData, mediaFiles]);
+  // Instagram's own media (ig_media_file / ig_media_url columns), mapped with the same rules; the
+  // kind is detected from the file or the URL's extension
+  const igMapping = useMemo(() => mapRowsToFiles(
+    csvData.map((r) => ({ media_type: '', media_file: r.ig_media_file, media_url: r.ig_media_url })), mediaFiles,
+  ), [csvData, mediaFiles]);
+  const hasIgOwn = (row: CSVRow) => !!(row.ig_media_file.trim() || row.ig_media_url.trim());
+  /** Instagram's media for a row: its own (ig_media_*) when set, else the shared media_file / media_url */
+  const igMediaAt = (index: number, row: CSVRow): { status: RowMediaStatus | undefined; url: string; own: boolean } => (
+    hasIgOwn(row)
+      ? { status: igMapping.rows[index], url: row.ig_media_url.trim(), own: true }
+      : { status: mediaMapping.rows[index], url: row.media_url.trim(), own: false });
+  // A dropped file is unused only if neither media_file nor ig_media_file names it
+  const unreferencedFiles = mediaMapping.unreferenced.filter((i) => igMapping.unreferenced.includes(i));
 
   // Files that an Instagram row uses → prepare them for Instagram (JPEG derivative / video checks)
   const igNeeded = useMemo(() => {
     const need = new Map<File, 'photo' | 'video'>();
     csvData.forEach((row, i) => {
       const pp = parsePlatformsCell(row.platforms);
-      const ms = mediaMapping.rows[i];
+      const own = !!(row.ig_media_file.trim() || row.ig_media_url.trim());
+      const ms = own ? igMapping.rows[i] : mediaMapping.rows[i];
       if (pp.ok && pp.platforms.includes('instagram') && ms?.state === 'file') need.set(mediaFiles[ms.fileIndex], ms.kind);
     });
     return need;
-  }, [csvData, mediaMapping, mediaFiles]);
+  }, [csvData, mediaMapping, igMapping, mediaFiles]);
 
   useEffect(() => {
     // two at a time: large photos are decoded and re-encoded in the browser
@@ -685,10 +702,18 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
     if (ms?.state === 'error') errors.push(ms.message);
     const igCaption = replacePlaceholders(row.ig_caption || row.post_content, pageValues(page));
     let pending = false;
+    if (!platforms.includes('instagram') && hasIgOwn(row)) {
+      warnings.push('ig_media_file / ig_media_url ignored: platforms does not include ig');
+    }
     if (platforms.includes('instagram')) {
-      const media: IgTargetMedia = ms?.state === 'file'
-        ? { source: 'file', kind: ms.kind, prepared: preparedIssues(igMedia.get(mediaFiles[ms.fileIndex])) }
-        : ms?.state === 'url' ? { source: 'url', kind: ms.kind, url: row.media_url.trim() } : { source: 'none' };
+      const igm = igMediaAt(i, row);
+      const s = igm.status;
+      if (igm.own && s?.state === 'error') {
+        errors.push(`Instagram media: ${s.code === 'invalid_media_type' ? 'ig_media_url must link to a .jpg photo or an .mp4/.mov video' : s.message}`);
+      }
+      const media: IgTargetMedia = s?.state === 'file'
+        ? { source: 'file', kind: s.kind, prepared: preparedIssues(igMedia.get(mediaFiles[s.fileIndex])) }
+        : s?.state === 'url' ? { source: 'url', kind: s.kind, url: igm.url } : { source: 'none' };
       const r = evaluateInstagramTarget({
         caption: igCaption, pageFound: !!page, hasIgAccount: !!page?.ig_user_id, media,
         direct: !!page && !needsApproval(page), instagramEnabled: igEnabled, hasSchedule: !!parseScheduledDate(row.scheduled_for),
@@ -737,14 +762,14 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   };
 
   /** Instagram preview media for a row: the cropped JPEG derivative, the video file, or the CSV link */
-  const igPreviewFor = (index: number, row: CSVRow): { url: string | null; ratio: number | null; note: string | null } => {
-    const ms = mediaMapping.rows[index];
-    if (ms?.state === 'url') return { url: row.media_url.trim(), ratio: null, note: null };
-    if (ms?.state !== 'file') return { url: null, ratio: null, note: null };
+  const igPreviewFor = (index: number, row: CSVRow): { kind: 'photo' | 'video' | null; url: string | null; ratio: number | null; note: string | null } => {
+    const { status: ms, url } = igMediaAt(index, row);
+    if (ms?.state === 'url') return { kind: ms.kind, url, ratio: null, note: null };
+    if (ms?.state !== 'file') return { kind: null, url: null, ratio: null, note: null };
     const info = igMedia.get(mediaFiles[ms.fileIndex]);
-    if (info?.state === 'photo') return { url: info.url, ratio: info.plan.ratio, note: info.plan.note || null };
-    if (info?.state === 'video') return { url: mediaObjectUrls[ms.fileIndex] || null, ratio: info.width && info.height ? info.width / info.height : null, note: null };
-    return { url: ms.kind === 'video' ? mediaObjectUrls[ms.fileIndex] || null : null, ratio: null, note: info ? null : 'Preparing Instagram version…' };
+    if (info?.state === 'photo') return { kind: ms.kind, url: info.url, ratio: info.plan.ratio, note: info.plan.note || null };
+    if (info?.state === 'video') return { kind: ms.kind, url: mediaObjectUrls[ms.fileIndex] || null, ratio: info.width && info.height ? info.width / info.height : null, note: null };
+    return { kind: ms.kind, url: ms.kind === 'video' ? mediaObjectUrls[ms.fileIndex] || null : null, ratio: null, note: info ? null : 'Preparing Instagram version…' };
   };
 
   const clearBulk = () => {
@@ -774,12 +799,15 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       // Originals serve Facebook, LinkedIn and X posts and Instagram videos; Instagram photos use their JPEG derivative.
       const originalFiles = new Set<number>();
       const igPhotoFiles = new Set<number>();
-      csvData.forEach((_, i) => {
+      csvData.forEach((row, i) => {
         const s = statuses[i];
         const plan = rowPlans[i];
-        if (s.state !== 'file' || !plan.page) return;
-        if (plan.platforms.some((pl) => pl !== 'instagram') || (plan.platforms.includes('instagram') && s.kind === 'video')) originalFiles.add(s.fileIndex);
-        if (plan.platforms.includes('instagram') && s.kind === 'photo') igPhotoFiles.add(s.fileIndex);
+        if (!plan.page) return;
+        if (s.state === 'file' && plan.platforms.some((pl) => pl !== 'instagram')) originalFiles.add(s.fileIndex);
+        if (plan.platforms.includes('instagram')) {
+          const ig = igMediaAt(i, row).status;
+          if (ig?.state === 'file') (ig.kind === 'video' ? originalFiles : igPhotoFiles).add(ig.fileIndex);
+        }
       });
       const uploads: { key: string; file: File }[] = [
         ...Array.from(originalFiles).map((i) => ({ key: `orig:${i}`, file: mediaFiles[i] })),
@@ -800,13 +828,16 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       }
       setUploadProgress(null);
 
+      // Instagram uses its own media (ig_media_*) when the row has it; every other platform the shared media
       const mediaFor = (index: number, row: CSVRow, platform: Platform): { media_type: string | null; media_url: string | null } => {
-        const s = statuses[index];
-        if (s.state === 'file') {
+        const { status: s, url } = platform === 'instagram'
+          ? igMediaAt(index, row)
+          : { status: statuses[index], url: row.media_url.trim() };
+        if (s?.state === 'file') {
           const key = platform === 'instagram' && s.kind === 'photo' ? `ig:${s.fileIndex}` : `orig:${s.fileIndex}`;
           return { media_type: s.kind, media_url: refByKey.get(key) || null };
         }
-        if (s.state === 'url') return { media_type: s.kind, media_url: row.media_url.trim() };
+        if (s?.state === 'url') return { media_type: s.kind, media_url: url };
         return { media_type: null, media_url: null };
       };
 
@@ -1030,6 +1061,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         media_url: row.media_url || '',
         platforms: row.platforms || '',
         ig_caption: row.ig_caption || '',
+        ig_media_file: row.ig_media_file || '',
+        ig_media_url: row.ig_media_url || '',
         linkedin_text: row.linkedin_text || '',
         x_text: row.x_text || '',
         bio_link: row.bio_link || '',
@@ -1064,7 +1097,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
 
   const downloadTemplate = () => {
     // 'notes' is for people reading the file; the importer ignores columns it doesn't know.
-    const headers = ['location_number', 'location_name', 'platforms', 'post_content', 'ig_caption', 'linkedin_text', 'x_text', 'link_url', 'bio_link', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'notes'];
+    const headers = ['location_number', 'location_name', 'platforms', 'post_content', 'ig_caption', 'linkedin_text', 'x_text', 'link_url', 'bio_link', 'scheduled_for', 'media_type', 'media_file', 'media_url', 'ig_media_file', 'ig_media_url', 'notes'];
     // One franchise example (matched on location_number) and non-franchise examples (blank
     // location_number, matched on the exact page name). Dates are 95+ days out so a test upload
     // can be reviewed and deleted long before it's due.
@@ -1097,11 +1130,18 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         `LINKEDIN ONLY, article: platforms li. With no photo/video, link_url becomes a LinkedIn article card. linkedin_text overrides post_content for LinkedIn. ${EXAMPLE_NOTE}`],
       ['0007', 'Example Franchise Location G', 'x', 'Text post for {{CITY}} on X.', '', '', 'Now serving {{CITY}}! Call {{PHONE}}.', '', daysOut(98, 11), '', '', '',
         `X ONLY: platforms x. X never uses link_url: put a URL in x_text if you want one (X charges about $0.20 per post with a link vs $0.015 without). Max 280 characters, links count as 23. ${EXAMPLE_NOTE}`],
+      ['0008', 'Example Franchise Location H', 'fb,ig', 'Read our new guide for {{CITY}} families.', 'New guide for {{CITY}} families. Link in bio!', '', '', '{{BASEURL}}', daysOut(99, 9), '', '', '',
+        `FACEBOOK LINK + INSTAGRAM PHOTO: Instagram can't post a link, so ig_media_file (or ig_media_url) gives Instagram its own photo or video while Facebook keeps link_url as a link post. Leave media_file blank so the Facebook post stays a link card. ${EXAMPLE_NOTE}`],
     ];
 
     // bio_link (Instagram link in bio tile) sits right after link_url; only the Instagram examples set it
-    const BIO_LINK_EXAMPLES: Record<string, string> = { '0004': '{{BASEURL}}', '0005': '{{BASEURL}}' };
-    const withBioLink = exampleRows.map((row) => [...row.slice(0, 8), BIO_LINK_EXAMPLES[row[0]] || '', ...row.slice(8)]);
+    const BIO_LINK_EXAMPLES: Record<string, string> = { '0004': '{{BASEURL}}', '0005': '{{BASEURL}}', '0008': '{{BASEURL}}' };
+    // ig_media_file / ig_media_url sit just before notes; only the Facebook link + Instagram photo example sets them
+    const IG_MEDIA_EXAMPLES: Record<string, [string, string]> = { '0008': ['example-photo.jpg', ''] };
+    const withBioLink = exampleRows.map((row) => {
+      const full = [...row.slice(0, 8), BIO_LINK_EXAMPLES[row[0]] || '', ...row.slice(8)];
+      return [...full.slice(0, -1), ...(IG_MEDIA_EXAMPLES[row[0]] || ['', '']), full[full.length - 1]];
+    });
 
     const csv = [
       headers.join(','),
@@ -1918,13 +1958,13 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                     </button>
                   </div>
                 )}
-                {mediaMapping.unreferenced.length > 0 && (
+                {unreferencedFiles.length > 0 && (
                   <div className="mt-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm text-amber-900">
                     <p className="font-medium">
-                      {mediaMapping.unreferenced.length} file(s) not used by any row{csvData.length > 0 ? ' (check the media_file column)' : ''}:
+                      {unreferencedFiles.length} file(s) not used by any row{csvData.length > 0 ? ' (check the media_file and ig_media_file columns)' : ''}:
                     </p>
                     <ul className="mt-1 flex flex-wrap gap-2">
-                      {mediaMapping.unreferenced.map((i) => (
+                      {unreferencedFiles.map((i) => (
                         <li key={`${mediaFiles[i].name}-${i}`} className="inline-flex items-center gap-1 bg-white border border-amber-200 rounded px-2 py-0.5">
                           {mediaFiles[i].name}
                           <button type="button" onClick={() => removeMediaFile(i)} className="text-amber-700 hover:text-amber-900" aria-label={`Remove ${mediaFiles[i].name}`}>
@@ -2007,7 +2047,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                                   username={pg?.ig_username || pg?.location_name || row.location_name || row.location_number}
                                   facebookPageId={pg?.facebook_page_id}
                                   caption={plan.igCaption}
-                                  mediaType={kind}
+                                  mediaType={ig.kind}
                                   mediaUrl={ig.url}
                                   aspectRatio={ig.ratio}
                                   note={ig.note}
@@ -2092,6 +2132,11 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                                 {ms?.state === 'url' && <span className="text-gray-500 max-w-[12rem] truncate inline-block align-middle">{row.media_url}</span>}
                                 {ms?.state === 'none' && <span className="text-gray-400">-</span>}
                                 {ms?.state === 'error' && <span className="text-red-700 font-medium">{mediaStatusLabel(ms)}</span>}
+                                {hasIgOwn(row) && (
+                                  <div className="text-xs text-pink-700 max-w-[12rem] truncate">
+                                    Instagram: {row.ig_media_file.trim() || row.ig_media_url.trim()}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-500 whitespace-nowrap">
                                 {formatDateForDisplay(row.scheduled_for)}
@@ -2175,6 +2220,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
                   <li>• <strong>media_type</strong> (optional): Leave empty for text, or use &quot;photo&quot; or &quot;video&quot;. With media_file it can be left blank (detected from the file)</li>
                   <li>• <strong>media_file</strong> (optional): File name of an image/video you upload together with the CSV (e.g. example-photo.jpg). Matching ignores upper/lower case and folders; without an extension it matches the file name before the dot. Several rows can share one file</li>
                   <li>• <strong>media_url</strong> (optional): Publicly accessible URL to a photo or video, used only when media_file is blank</li>
+                  <li>• <strong>ig_media_file</strong> / <strong>ig_media_url</strong> (optional): Instagram&apos;s own photo or video, matched like media_file / media_url (type detected from the file or the link&apos;s .jpg/.mp4/.mov ending). Use with <code>fb,ig</code> and a link_url to post a Facebook link and an Instagram photo/video from one row. Blank = Instagram uses media_file / media_url</li>
                   <li>• <strong>notes</strong> (optional): Your own notes; ignored on upload</li>
                 </ul>
                 <p className="text-sm text-gray-500 mt-2">Note: Either location_number or location_name is required for each row.</p>
