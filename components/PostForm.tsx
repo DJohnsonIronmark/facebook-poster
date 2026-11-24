@@ -152,6 +152,8 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
   const [showBulkPreviews, setShowBulkPreviews] = useState(false);
   // Instagram
   const [igEnabled, setIgEnabled] = useState(false);
+  // The app publishes Instagram itself (INSTAGRAM_APP_PUBLISHING_ENABLED): Instagram may be published now
+  const [igAppPublishing, setIgAppPublishing] = useState(false);
   const [wantFb, setWantFb] = useState(true);
   const [wantIg, setWantIg] = useState(false);
   const [igCaption, setIgCaption] = useState('');
@@ -191,7 +193,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
       .catch(() => {});
     fetch('/api/instagram/status')
       .then((r) => (r.ok ? r.json() : { publishing_enabled: false }))
-      .then((d) => setIgEnabled(d.publishing_enabled === true))
+      .then((d) => { setIgEnabled(d.publishing_enabled === true); setIgAppPublishing(d.app_publishing === true); })
       .catch(() => {});
   }, []);
 
@@ -255,6 +257,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
         instagramEnabled: igEnabled,
         hasSchedule: !!scheduledFor,
         publishNow,
+        allowPublishNow: igAppPublishing,
       });
       pending = pending || r.pending;
       r.errors.forEach((e) => errors.set(e, [...(errors.get(e) || []), pg.location_name]));

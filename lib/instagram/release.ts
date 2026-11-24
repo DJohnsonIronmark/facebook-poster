@@ -91,8 +91,11 @@ export function directPostDecision(input: {
   instagramEnabled: boolean;
   linkedinEnabled?: boolean;
   xEnabled?: boolean;
+  /** The app publishes Instagram itself (INSTAGRAM_APP_PUBLISHING_ENABLED): enabled, and publish now allowed */
+  instagramAppPublishing?: boolean;
 }): { ok: true; useWebhookIfSameDay: boolean } | { ok: false; status: number; error: string } {
   if (input.platform === 'facebook') return { ok: true, useWebhookIfSameDay: true };
+  if (input.platform === 'instagram' && input.instagramAppPublishing) return { ok: true, useWebhookIfSameDay: false };
   const on = input.platform === 'instagram' ? input.instagramEnabled
     : input.platform === 'linkedin' ? !!input.linkedinEnabled : !!input.xEnabled;
   const name = SWITCH_NAME[input.platform];

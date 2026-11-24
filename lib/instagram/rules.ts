@@ -264,6 +264,8 @@ export interface IgTargetInput {
   instagramEnabled: boolean;
   hasSchedule: boolean;
   publishNow?: boolean;
+  /** true while the app publishes Instagram itself (INSTAGRAM_APP_PUBLISHING_ENABLED): publish now is allowed */
+  allowPublishNow?: boolean;
 }
 
 /**
@@ -298,8 +300,9 @@ export function evaluateInstagramTarget(input: IgTargetInput): Issues & { pendin
     if (!input.instagramEnabled) {
       errors.push("Instagram publishing isn't enabled yet; for now Instagram posts only go through the client approval workflow");
     } else {
-      if (input.publishNow) errors.push("Instagram posts can't be published immediately; schedule them");
-      else if (!input.hasSchedule) errors.push('Instagram posts need a schedule date');
+      if (input.publishNow) {
+        if (!input.allowPublishNow) errors.push("Instagram posts can't be published immediately; schedule them");
+      } else if (!input.hasSchedule) errors.push('Instagram posts need a schedule date');
     }
   }
   return { errors, warnings, pending };
