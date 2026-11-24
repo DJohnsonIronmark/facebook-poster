@@ -66,7 +66,8 @@ export async function claimAndPublishInstagram(supabase: SupabaseClient, post: I
 
   const { data: claimed } = await supabase.from('facebook_scheduled_posts')
     .update({ status: 'publishing', publish_started_at: new Date().toISOString(), publish_error: null })
-    .eq('id', post.id).eq('status', 'pending').select('id');
+    // An Instagram media ID already saved means it is already on Instagram: never publish it twice
+    .eq('id', post.id).eq('status', 'pending').is('facebook_post_id', null).select('id');
   if (!claimed || claimed.length === 0) return { ok: false, error: 'This post is already publishing or was published', claimed: false, alreadyClaimed: true };
 
   try {

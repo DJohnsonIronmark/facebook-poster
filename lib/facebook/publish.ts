@@ -173,9 +173,23 @@ export async function claimAndPublishFacebook(supabase: SupabaseClient, post: Fa
     .eq('status', 'pending')
     .eq('platform', 'facebook')
     .eq('publish_via', 'app')
+    // A post that already has a Facebook ID was already sent to Facebook (e.g. n8n scheduled it there
+    // before the page moved to app publishing): never publish it a second time
+    .is('facebook_post_id', null)
     .select('id');
   if (claimErr) return { status: 'skipped', reason: `Could not claim the post: ${claimErr.message}` };
-  if ((claimed || []).length !== 1) return { status: 'skipped', reason: 'Post is no longer waiting to publish (already published, publishing, or moved)' };
+  if ((claimed || []).length !== 1) {
+    // Already on Facebook (sent by n8n): record it as published instead of posting a duplicate
+    const { data: sent } = await supabase
+      .from('facebook_scheduled_posts')
+      .update({ status: 'published', published_at: new Date().toISOString(), publish_error: null })
+      .eq('id', post.id)
+      .eq('status', 'pending')
+      .not('facebook_post_id', 'is', null)
+      .select('id');
+    if ((sent || []).length === 1) return { status: 'skipped', reason: 'Already sent to Facebook earlier (by n8n); marked as published, not posted again' };
+    return { status: 'skipped', reason: 'Post is no longer waiting to publish (already published, publishing, or moved)' };
+  }
 
   let outcome: FacebookPublishOutcome;
   try {
