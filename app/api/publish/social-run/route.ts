@@ -63,7 +63,7 @@ export async function GET(request: NextRequest) {
   if (facebookOn) {
     const { count, error } = await supabase
       .from('facebook_scheduled_posts').select('id', { count: 'exact', head: true })
-      .eq('status', 'pending').eq('platform', 'facebook').eq('publish_via', 'app').lte('scheduled_for', nowIso);
+      .eq('status', 'pending').eq('platform', 'facebook').lte('scheduled_for', nowIso);
     if (error) return NextResponse.json({ error: 'Failed to count Facebook posts' }, { status: 500 });
     facebookDue = count || 0;
   }
@@ -72,7 +72,7 @@ export async function GET(request: NextRequest) {
     .eq('status', 'publishing').in('platform', ['linkedin', 'x']).lt('publish_started_at', staleIso);
   const { count: staleFacebook } = await supabase
     .from('facebook_scheduled_posts').select('id', { count: 'exact', head: true })
-    .eq('status', 'publishing').eq('platform', 'facebook').eq('publish_via', 'app').lt('publish_started_at', staleIso);
+    .eq('status', 'publishing').eq('platform', 'facebook').lt('publish_started_at', staleIso);
   return NextResponse.json({
     dry_run: true, enabled_platforms: platforms, due, would_claim: Math.min(due, BATCH), stale_publishing: stale || 0,
     facebook_app: { enabled: facebookOn, due: facebookDue, would_claim: Math.min(facebookDue, BATCH), stale_publishing: staleFacebook || 0 },

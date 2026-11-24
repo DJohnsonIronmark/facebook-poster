@@ -172,10 +172,23 @@ export async function claimAndPublishFacebook(supabase: SupabaseClient, post: Fa
     .eq('id', post.id)
     .eq('status', 'pending')
     .eq('platform', 'facebook')
-    .eq('publish_via', 'app')
+    // A post that already has a Facebook ID was already sent to Facebook (e.g. n8n scheduled it there
+    // before the page moved to app publishing): never publish it a second time
+    .is('facebook_post_id', null)
     .select('id');
   if (claimErr) return { status: 'skipped', reason: `Could not claim the post: ${claimErr.message}` };
-  if ((claimed || []).length !== 1) return { status: 'skipped', reason: 'Post is no longer waiting to publish (already published, publishing, or moved)' };
+  if ((claimed || []).length !== 1) {
+    // Already on Facebook (sent by n8n): record it as published instead of posting a duplicate
+    const { data: sent } = await supabase
+      .from('facebook_scheduled_posts')
+      .update({ status: 'published', published_at: new Date().toISOString(), publish_error: null })
+      .eq('id', post.id)
+      .eq('status', 'pending')
+      .not('facebook_post_id', 'is', null)
+      .select('id');
+    if ((sent || []).length === 1) return { status: 'skipped', reason: 'Already sent to Facebook earlier (by n8n); marked as published, not posted again' };
+    return { status: 'skipped', reason: 'Post is no longer waiting to publish (already published, publishing, or moved)' };
+  }
 
   let outcome: FacebookPublishOutcome;
   try {
@@ -202,9 +215,10 @@ export async function claimAndPublishFacebook(supabase: SupabaseClient, post: Fa
   return { status: 'failed', error: message };
 }
 
-/** Reads a page's publish_via ('n8n' unless the page is set to 'app'). */
-export async function pagePublishVia(supabase: SupabaseClient, facebookPageId: string): Promise<'n8n' | 'app'> {
-  const { data } = await supabase.from('facebook_pages').select('publish_via').eq('facebook_page_id', String(facebookPageId)).limit(1);
-  const v = (data || [])[0]?.publish_via;
-  return v === 'app' ? 'app' : 'n8n';
+/**
+ * Every Facebook page publishes from the app (since 11/24; n8n is no longer a publisher). The
+ * facebook_pages.publish_via column is kept for history but ignored.
+ */
+export async function pagePublishVia(_supabase: SupabaseClient, _facebookPageId: string): Promise<'app'> {
+  return 'app';
 }

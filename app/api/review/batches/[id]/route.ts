@@ -4,8 +4,7 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { generateReviewToken } from '@/lib/review/tokens';
 import { allowedSenderDomain, appBaseUrl, isAllowedSender, notifyClientReview } from '@/lib/review/notify';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
-import { isScheduledForToday, sendScheduledPostToWebhook } from '@/lib/publisher';
-import { planScheduleRelease, platformEnabled, platformOf, shouldSendSameDay } from '@/lib/instagram/release';
+import { planScheduleRelease, platformEnabled, platformOf } from '@/lib/instagram/release';
 import { instagramCaptionProblem, instagramMediaProblem } from '@/lib/instagram/server';
 import { publishingSwitches } from '@/lib/social/switches';
 import {
@@ -334,19 +333,8 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         failures.push(`${post.franchise_name}: ${why}; post not released`);
       }
 
-      // Same-day posts go to the Facebook webhook: Facebook rows only, never Instagram / LinkedIn / X,
-      // and never pages set to publish_via='app'
-      let webhookFailed = 0;
-      for (const post of released) {
-        if (!shouldSendSameDay(post, isScheduledForToday(post.scheduled_for))) continue; // n8n daily publisher handles the rest
-        if (post.publish_via === 'app') continue; // page publishes from the app: the app runner picks it up when due
-        const res = await sendScheduledPostToWebhook(post);
-        if (!res.ok) {
-          webhookFailed++;
-          failures.push(`${post.franchise_name}: ${res.error}`);
-          await supabase.from('facebook_scheduled_posts').update({ status: 'failed' }).eq('id', post.id);
-        }
-      }
+      // Released rows are published by the app's runner (Vercel Cron) when due; no n8n webhook
+      const webhookFailed = 0;
 
       // Anything still waiting (held Instagram rows, rows that failed to release) keeps the batch
       // in Ready to post so it can be scheduled again; re-scheduling only touches client_approved rows.

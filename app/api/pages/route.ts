@@ -245,7 +245,8 @@ export async function PATCH(request: NextRequest) {
   // A DB trigger moves the page's unpublished posts along with it.
   if (hasPublishVia) {
     const v = body.publish_via;
-    if (v !== 'n8n' && v !== 'app') return NextResponse.json({ error: "publish_via must be 'n8n' or 'app'" }, { status: 400 });
+    // n8n is no longer a publisher: every page publishes from the app
+    if (v !== 'app') return NextResponse.json({ error: "publish_via can only be 'app' (n8n publishing was removed)" }, { status: 400 });
     if (v === 'app') {
       if (!facebookAppPublishingEnabled()) return NextResponse.json({ error: 'App publishing is turned off (FACEBOOK_APP_PUBLISHING_ENABLED)' }, { status: 409 });
       const ready = (await publishReadinessFor(supabase, [String(current.facebook_page_id)])).get(String(current.facebook_page_id));
