@@ -128,7 +128,7 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
       accountManager: batch.client?.account_manager_email,
       uploadedBy: batch.created_by_email,
       clientName: batch.client?.name || 'Client',
-      batchName: batch.name || 'Review batch',
+      batchName: batch.name || 'Campaign review',
       savedBy: approver || null,
       changes,
       baseUrl: appBaseUrl(request),

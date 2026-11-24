@@ -194,7 +194,7 @@ export async function POST(request: NextRequest) {
     if (!batch) {
       batch = await createBatch(supabase, client.id, `${client.name} – ${batchLabel || dateLabel}`, user.email);
       if (!batch) {
-        clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'failed to create review batch' }));
+        clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'failed to create campaign' }));
         continue;
       }
     }
@@ -256,7 +256,7 @@ export async function POST(request: NextRequest) {
         } else {
           // Could not create a batch: unlink rather than leave unreviewed drafts in a client-facing batch
           await supabase.from('facebook_scheduled_posts').update({ review_batch_id: null }).in('id', ids).eq('status', 'internal_review');
-          clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'review batch changed during upload; please upload again' }));
+          clientRows.forEach((r) => skipped.push({ row: r.index + 1, reason: 'campaign changed during upload; please upload again' }));
           continue;
         }
         finalJoined = false;
