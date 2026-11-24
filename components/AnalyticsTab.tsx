@@ -37,7 +37,7 @@ export default function AnalyticsTab({ clients, pages }: {
   const [client, setClient] = useState('all');
   const [page, setPage] = useState('');
   const [platform, setPlatform] = useState<'all' | 'facebook' | 'instagram'>('all');
-  const [days, setDays] = useState(30);
+  const [days, setDays] = useState(90);
   const [data, setData] = useState<Data | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -158,7 +158,7 @@ export default function AnalyticsTab({ clients, pages }: {
           <div className="bg-white rounded-lg shadow p-4">
             <h3 className="text-sm font-medium text-gray-700 mb-3">Engagements by publish day</h3>
             {t.posts === 0 ? (
-              <p className="text-sm text-gray-500 py-8 text-center">No published posts with metrics in this range yet.</p>
+              <p className="text-sm text-gray-500 py-8 text-center">No posts with metrics in this range. Try a longer range, or check back after the next daily refresh.</p>
             ) : (
               <div className="relative">
                 <div className="flex items-end gap-[2px] h-40 border-b border-gray-200" onMouseLeave={() => setHover(null)}>
@@ -241,7 +241,7 @@ export default function AnalyticsTab({ clients, pages }: {
               </table>
             </div>
           </div>
-          <p className="text-xs text-gray-500">Metrics are lifetime totals per post, refreshed daily for 90 days after publishing. Posts are grouped by the day they were published.</p>
+          <p className="text-xs text-gray-500">Includes every post on each connected page and Instagram account (not just posts sent from this app). Metrics are lifetime totals per post, refreshed daily for 90 days after publishing; posts are grouped by publish day.</p>
         </>
       )}
     </div>
