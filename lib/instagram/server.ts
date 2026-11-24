@@ -3,9 +3,13 @@ import { isInstagramMediaUrl, isInstagramPublishingEnabled, validateIgCaption } 
 
 // Server-only Instagram helpers.
 
-/** INSTAGRAM_PUBLISHING_ENABLED (default off). See lib/instagram/release.ts for what it gates. */
+/**
+ * Whether Instagram rows may be released / scheduled: n8n publishes them (INSTAGRAM_PUBLISHING_ENABLED)
+ * or the app does (INSTAGRAM_APP_PUBLISHING_ENABLED). Default off. See lib/instagram/release.ts.
+ */
 export function instagramPublishingEnabled(): boolean {
-  return isInstagramPublishingEnabled(process.env.INSTAGRAM_PUBLISHING_ENABLED);
+  return isInstagramPublishingEnabled(process.env.INSTAGRAM_PUBLISHING_ENABLED)
+    || isInstagramPublishingEnabled(process.env.INSTAGRAM_APP_PUBLISHING_ENABLED);
 }
 
 /**
