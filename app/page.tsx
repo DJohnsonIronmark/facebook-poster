@@ -8,6 +8,7 @@ import PostFilters, { FilterState } from '@/components/PostFilters';
 import ApprovalsTab from '@/components/ApprovalsTab';
 import PagesManager from '@/components/PagesManager';
 import ClientSettings from '@/components/ClientSettings';
+import PostCalendar from '@/components/PostCalendar';
 import LinkInBioTab from '@/components/LinkInBioTab';
 import InboxTab from '@/components/InboxTab';
 import { createClient } from '@/lib/supabase/client';
@@ -48,7 +49,9 @@ export interface ScheduledPost {
   platform?: 'facebook' | 'instagram' | 'linkedin' | 'x' | null;
   post_group_id?: string | null;
   platform_post_id?: string | null;   // LinkedIn post URN / X post id once published
-  publish_error?: string | null;      // last LinkedIn / X publishing failure
+  publish_error?: string | null;      // last LinkedIn / X / Instagram / app publishing failure
+  media_url?: string | null;
+  media_type?: string | null;
   linkedin_org_name?: string | null;
   x_username?: string | null;
 }
@@ -59,6 +62,13 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'inbox' | 'bio' | 'pages' | 'clients'>('create');
   const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
+  // Scheduled tab: list or month calendar (remembered per browser)
+  const [scheduledView, setScheduledView] = useState<'list' | 'calendar'>('list');
+  useEffect(() => {
+    const saved = window.localStorage.getItem('scheduledView');
+    if (saved === 'calendar' || saved === 'list') setScheduledView(saved);
+  }, []);
+  const chooseScheduledView = (v: 'list' | 'calendar') => { setScheduledView(v); window.localStorage.setItem('scheduledView', v); };
   const router = useRouter();
   const supabase = createClient();
   const { role, user } = useAuth();
@@ -129,7 +139,7 @@ export default function Home() {
   // Scheduled tab: waiting posts, LinkedIn/X posts the runner is posting right now, and LinkedIn/X
   // posts whose publishing failed (their error is shown; Facebook failures are handled in n8n)
   const pendingPosts = posts.filter(p => p.status === 'pending' || p.status === 'publishing'
-    || (p.status === 'failed' && (p.platform === 'linkedin' || p.platform === 'x')));
+    || (p.status === 'failed' && (p.platform === 'linkedin' || p.platform === 'x' || p.platform === 'instagram')));
   const publishedPosts = posts.filter(p => p.status === 'published');
   // Apply filters to published posts
   const filteredPublishedPosts = useMemo(() => {
@@ -327,15 +337,31 @@ export default function Home() {
           />
         )}
         {activeTab === 'scheduled' && (
-          <PostList
-            posts={pendingPosts}
-            loading={loading}
-            emptyMessage="No scheduled posts"
-            showPublishButton={true}
-            onPostDeleted={handlePostDeleted}
-            onPostPublished={handlePostPublished}
-            canEdit={role !== 'viewer'}
-          />
+          <div className="space-y-4">
+            <div className="flex justify-end">
+              <div className="inline-flex rounded-lg bg-white shadow-sm p-1" role="tablist" aria-label="Scheduled view">
+                {(['list', 'calendar'] as const).map((v) => (
+                  <button key={v} role="tab" aria-selected={scheduledView === v} onClick={() => chooseScheduledView(v)}
+                    className={`px-3 py-1.5 rounded-md text-sm font-medium ${scheduledView === v ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+                    {v === 'list' ? 'List' : 'Calendar'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {scheduledView === 'calendar' ? (
+              loading ? <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600">Loading…</div> : <PostCalendar posts={pendingPosts} />
+            ) : (
+              <PostList
+                posts={pendingPosts}
+                loading={loading}
+                emptyMessage="No scheduled posts"
+                showPublishButton={true}
+                onPostDeleted={handlePostDeleted}
+                onPostPublished={handlePostPublished}
+                canEdit={role !== 'viewer'}
+              />
+            )}
+          </div>
         )}
         {activeTab === 'published' && (
           <>
