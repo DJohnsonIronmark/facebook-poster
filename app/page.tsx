@@ -69,6 +69,18 @@ export default function Home() {
     if (saved === 'calendar' || saved === 'list') setScheduledView(saved);
   }, []);
   const chooseScheduledView = (v: 'list' | 'calendar') => { setScheduledView(v); window.localStorage.setItem('scheduledView', v); };
+  // Scheduled tab: filter by client ('all', 'none' = pages with no client, or a client id); remembered per browser
+  const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
+  const [scheduledClient, setScheduledClient] = useState('all');
+  useEffect(() => {
+    const saved = window.localStorage.getItem('scheduledClient');
+    if (saved) setScheduledClient(saved);
+    fetch('/api/clients')
+      .then((r) => (r.ok ? r.json() : { clients: [] }))
+      .then((d) => setClients((d.clients || []).map((c: { id: string; name: string }) => ({ id: c.id, name: c.name }))))
+      .catch(() => {});
+  }, []);
+  const chooseScheduledClient = (v: string) => { setScheduledClient(v); window.localStorage.setItem('scheduledClient', v); };
   const router = useRouter();
   const supabase = createClient();
   const { role, user } = useAuth();
@@ -141,6 +153,14 @@ export default function Home() {
   const pendingPosts = posts.filter(p => p.status === 'pending' || p.status === 'publishing'
     || (p.status === 'failed' && (p.platform === 'linkedin' || p.platform === 'x' || p.platform === 'instagram')));
   const publishedPosts = posts.filter(p => p.status === 'published');
+  // Client of each post, through its page (facebook_page_id → page → client_id)
+  const clientOfPage = new Map(pages.map((pg) => [pg.facebook_page_id, pg.client_id || null]));
+  const clientOfPost = (p: ScheduledPost) => clientOfPage.get(p.facebook_page_id) ?? null;
+  const scheduledCount = (key: string) => pendingPosts.filter((p) => (key === 'none' ? !clientOfPost(p) : clientOfPost(p) === key)).length;
+  // A remembered client that no longer exists falls back to all clients
+  const activeScheduledClient = scheduledClient === 'all' || scheduledClient === 'none' || clients.some((c) => c.id === scheduledClient) ? scheduledClient : 'all';
+  const scheduledVisible = activeScheduledClient === 'all' ? pendingPosts
+    : pendingPosts.filter((p) => (activeScheduledClient === 'none' ? !clientOfPost(p) : clientOfPost(p) === activeScheduledClient));
   // Apply filters to published posts
   const filteredPublishedPosts = useMemo(() => {
     return publishedPosts.filter(post => {
@@ -338,8 +358,22 @@ export default function Home() {
         )}
         {activeTab === 'scheduled' && (
           <div className="space-y-4">
-            <div className="flex justify-end">
-              <div className="inline-flex rounded-lg bg-white shadow-sm p-1" role="tablist" aria-label="Scheduled view">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <span>Client</span>
+                <select value={activeScheduledClient} onChange={(e) => chooseScheduledClient(e.target.value)}
+                  className="border border-gray-300 rounded-lg px-3 py-1.5 bg-white text-sm" aria-label="Filter scheduled posts by client">
+                  <option value="all">All clients ({pendingPosts.length})</option>
+                  {[...clients].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map((c) => (
+                    <option key={c.id} value={c.id}>{c.name} ({scheduledCount(c.id)})</option>
+                  ))}
+                  {scheduledCount('none') > 0 && <option value="none">No client ({scheduledCount('none')})</option>}
+                </select>
+              </label>
+              {activeScheduledClient !== 'all' && (
+                <button onClick={() => chooseScheduledClient('all')} className="text-sm text-blue-600 hover:underline">Clear</button>
+              )}
+              <div className="ml-auto inline-flex rounded-lg bg-white shadow-sm p-1" role="tablist" aria-label="Scheduled view">
                 {(['list', 'calendar'] as const).map((v) => (
                   <button key={v} role="tab" aria-selected={scheduledView === v} onClick={() => chooseScheduledView(v)}
                     className={`px-3 py-1.5 rounded-md text-sm font-medium ${scheduledView === v ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
@@ -349,12 +383,12 @@ export default function Home() {
               </div>
             </div>
             {scheduledView === 'calendar' ? (
-              loading ? <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600">Loading…</div> : <PostCalendar posts={pendingPosts} />
+              loading ? <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600">Loading…</div> : <PostCalendar posts={scheduledVisible} />
             ) : (
               <PostList
-                posts={pendingPosts}
+                posts={scheduledVisible}
                 loading={loading}
-                emptyMessage="No scheduled posts"
+                emptyMessage={activeScheduledClient === 'all' ? 'No scheduled posts' : 'No scheduled posts for this client'}
                 showPublishButton={true}
                 onPostDeleted={handlePostDeleted}
                 onPostPublished={handlePostPublished}
