@@ -10,6 +10,7 @@ import { cleanBioUrl } from '@/lib/bio/rules';
 import { directPostDecision } from '@/lib/instagram/release';
 import { instagramPublishingEnabled, instagramRowProblem } from '@/lib/instagram/server';
 import { facebookAppPublishingEnabled, linkedinPublishingEnabled, xPublishingEnabled } from '@/lib/social/switches';
+import { deleteFromPlatform } from '@/lib/social/platformDelete';
 import { claimAndPublishFacebook, pagePublishVia, type FacebookPostRow } from '@/lib/facebook/publish';
 import {
   attachSocialIdentities, isSocialPlatform, loadConnectionsLite, loadPageMappings, pageSocialProblem, pickMappingFor,
@@ -240,10 +241,27 @@ export async function DELETE(request: NextRequest) {
   }
 
   const supabase = createServiceClient();
+
+  // ?from_platform=1: delete the published post on Facebook / Instagram first; the app's record is
+  // only removed once the platform has deleted it, so a refusal never leaves a live post untracked.
+  const fromPlatform = new URL(request.url).searchParams.get('from_platform') === '1';
+  let alreadyGone = false;
+  if (fromPlatform) {
+    const { data: post } = await supabase.from('facebook_scheduled_posts')
+      .select('id, status, platform, facebook_page_id, facebook_post_id').eq('id', postId).maybeSingle();
+    if (!post) return NextResponse.json({ error: 'Post not found' }, { status: 404 });
+    if (post.status !== 'published') {
+      return NextResponse.json({ error: 'Only published posts can be deleted from Facebook / Instagram' }, { status: 409 });
+    }
+    const result = await deleteFromPlatform(supabase, post);
+    if (!result.ok) return NextResponse.json({ error: result.message }, { status: result.status });
+    alreadyGone = result.alreadyGone;
+  }
+
   const { error } = await supabase.from('facebook_scheduled_posts').delete().eq('id', postId);
   if (error) {
     console.error('posts DELETE', error);
-    return NextResponse.json({ error: 'Failed to delete post' }, { status: 500 });
+    return NextResponse.json({ error: fromPlatform ? 'Deleted from the platform, but failed to remove it from the app; refresh and remove it from the list' : 'Failed to delete post' }, { status: 500 });
   }
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, deleted_from_platform: fromPlatform, already_gone: alreadyGone });
 }

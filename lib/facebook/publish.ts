@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { GraphError, INBOX_SCOPES, graph, inboxEnabled, markNeedsReauth, pageToken } from '@/lib/inbox/server';
 import { facebookAppPublishingEnabled } from '@/lib/social/switches';
 import { truncate } from '@/lib/social/http';
+import { DELETE_SCOPES, platformDeleteEnabled } from '@/lib/social/platformDelete';
 
 // Server-only: Facebook publishing by the app itself, with each page's own token (fb_page_tokens),
 // for pages set to publish_via = 'app'. Pages left on 'n8n' keep publishing through n8n's shared
@@ -33,6 +34,8 @@ export function pageConnectScopes(): string[] {
   const scopes = new Set<string>(['pages_show_list']);
   if (inboxEnabled()) INBOX_SCOPES.forEach((s) => scopes.add(s));
   if (facebookAppPublishingEnabled()) PUBLISH_SCOPES.forEach((s) => scopes.add(s));
+  // Deleting published posts from Facebook / Instagram (PLATFORM_DELETE_ENABLED)
+  if (platformDeleteEnabled()) DELETE_SCOPES.forEach((s) => scopes.add(s));
   return Array.from(scopes);
 }
 
