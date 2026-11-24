@@ -89,7 +89,10 @@ export async function exchangeCode(code: string, origin: string): Promise<string
 
 export interface ManagedPage {
   id: string;
+  /** The page's public name; every location page of a brand can share it (e.g. "Home Instead") */
   name: string;
+  /** The name as Facebook shows it to page admins, with the location descriptor, e.g. "Home Instead (Smithtown, NY)" */
+  display_name: string;
   picture: string | null;
   location: string | null;
 }
@@ -97,7 +100,24 @@ export interface ManagedPage {
 /** Graph paging cursor: base64url-ish, bounded. Anything else is refused. */
 export const PAGE_CURSOR_RE = /^[A-Za-z0-9_\-=]{1,512}$/;
 
-const PAGE_FIELDS = 'id,name,picture{url},location{city,state}';
+// name_with_location_descriptor is only filled in for page admins (others get `name`), which is
+// exactly who imports pages here; store_location_descriptor is the fallback for location pages.
+const PAGE_FIELDS = 'id,name,name_with_location_descriptor,store_location_descriptor,picture{url},location{city,state}';
+
+/**
+ * The page name with its location descriptor, so location pages of one brand can be told apart:
+ * Facebook's name_with_location_descriptor when it adds something, else "<name> (<store descriptor>)",
+ * else the plain name. Max 200 characters (the page-name limit).
+ */
+export function pageDisplayName(p: { name?: unknown; name_with_location_descriptor?: unknown; store_location_descriptor?: unknown }): string {
+  const clean = (v: unknown) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '');
+  const name = clean(p.name);
+  const withDescriptor = clean(p.name_with_location_descriptor);
+  if (withDescriptor && withDescriptor !== name) return withDescriptor.slice(0, 200);
+  const store = clean(p.store_location_descriptor);
+  if (store && !name.toLowerCase().includes(store.toLowerCase())) return `${name} (${store})`.slice(0, 200);
+  return name;
+}
 const PAGE_BATCH = 100;           // pages per Graph call (Graph's /me/accounts maximum page size we rely on)
 const CALLS_PER_CHUNK = 3;        // Graph calls per request → up to 300 pages per request
 const CHUNK_BUDGET_MS = 8000;     // stop starting new Graph calls after this, so a request never runs long
@@ -123,7 +143,10 @@ export async function listManagedPagesChunk(userToken: string, after: string | n
     const data = await res.json();
     for (const p of data.data || []) {
       const loc = p.location ? [p.location.city, p.location.state].filter(Boolean).join(', ') : '';
-      out.push({ id: String(p.id), name: String(p.name || ''), picture: p.picture?.data?.url || null, location: loc || null });
+      out.push({
+        id: String(p.id), name: String(p.name || ''), display_name: pageDisplayName(p),
+        picture: p.picture?.data?.url || null, location: loc || null,
+      });
     }
     // Graph includes cursors on the last page too; only `paging.next` means there is more
     const nextCursor = data.paging?.next ? data.paging?.cursors?.after : null;

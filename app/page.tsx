@@ -7,6 +7,7 @@ import PostList from '@/components/PostList';
 import PostFilters, { FilterState } from '@/components/PostFilters';
 import ApprovalsTab from '@/components/ApprovalsTab';
 import PagesManager from '@/components/PagesManager';
+import ClientSettings from '@/components/ClientSettings';
 import LinkInBioTab from '@/components/LinkInBioTab';
 import InboxTab from '@/components/InboxTab';
 import { createClient } from '@/lib/supabase/client';
@@ -56,16 +57,21 @@ export default function Home() {
   const [pages, setPages] = useState<FacebookPage[]>([]);
   const [posts, setPosts] = useState<ScheduledPost[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'inbox' | 'bio' | 'pages'>('create');
+  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'inbox' | 'bio' | 'pages' | 'clients'>('create');
   const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
   const router = useRouter();
   const supabase = createClient();
   const { role, user } = useAuth();
 
+  // Internal View Only (viewer) accounts can't create posts: start them on Approvals
+  useEffect(() => {
+    if (role === 'viewer') setActiveTab((t) => (t === 'create' ? 'approvals' : t));
+  }, [role]);
+
   // Deep link from notification emails: /?tab=approvals
   useEffect(() => {
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published' || tab === 'inbox' || tab === 'bio' || tab === 'pages') setActiveTab(tab);
+    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published' || tab === 'inbox' || tab === 'bio' || tab === 'pages' || tab === 'clients') setActiveTab(tab);
   }, []);
 
   const handleLogout = async () => {
@@ -191,6 +197,7 @@ export default function Home() {
       <div className="max-w-5xl mx-auto px-4 mt-6">
         <div className="border-b border-gray-200">
           <nav className="-mb-px flex space-x-6">
+            {role !== 'viewer' && (
             <button
               onClick={() => setActiveTab('create')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
@@ -201,6 +208,7 @@ export default function Home() {
             >
               Create Post
             </button>
+            )}
             <button
               onClick={() => setActiveTab('approvals')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
@@ -263,17 +271,45 @@ export default function Home() {
                 Pages ({pages.length})
               </button>
             )}
+            {role === 'admin' && (
+              <button
+                onClick={() => setActiveTab('clients')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'clients'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Clients
+              </button>
+            )}
           </nav>
         </div>
       </div>
 
       {/* Content */}
       <main className="max-w-5xl mx-auto px-4 py-8">
-        {activeTab === 'create' && (
+        {activeTab === 'create' && role !== 'viewer' && (
           <PostForm pages={pages} onPostCreated={handlePostCreated} />
         )}
         {activeTab === 'pages' && (role === 'admin' || role === 'manager') && (
           <PagesManager onPagesChanged={fetchPages} />
+        )}
+        {activeTab === 'clients' && role === 'admin' && (
+          <div className="space-y-4">
+            <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-sm text-blue-900">
+              <p className="font-medium">Set up a client for the approval workflow</p>
+              <ol className="mt-1 list-decimal list-inside space-y-0.5">
+                <li>Add the client below (e.g. Home Instead), or open one that already exists.</li>
+                <li>Turn on <strong>Approval workflow</strong>, then add the account manager and the client reviewers&apos; emails.</li>
+                <li>Choose the client&apos;s pages and save. New posts for those pages then go to the Approvals tab for review.</li>
+              </ol>
+            </div>
+            <ClientSettings />
+          </div>
+        )}
+        {activeTab === 'clients' && role !== 'admin' && (
+          <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">Only admins can set up clients.</div>
         )}
         {activeTab === 'inbox' && (
           <InboxTab canAct={role === 'admin' || role === 'manager'} />
@@ -287,6 +323,7 @@ export default function Home() {
             isAdmin={role === 'admin'}
             userEmail={user?.email ?? null}
             onScheduled={fetchPosts}
+            onOpenClients={() => setActiveTab('clients')}
           />
         )}
         {activeTab === 'scheduled' && (
@@ -297,6 +334,7 @@ export default function Home() {
             showPublishButton={true}
             onPostDeleted={handlePostDeleted}
             onPostPublished={handlePostPublished}
+            canEdit={role !== 'viewer'}
           />
         )}
         {activeTab === 'published' && (
@@ -314,6 +352,7 @@ export default function Home() {
               showPublishButton={false}
               onPostDeleted={handlePostDeleted}
               onPostPublished={handlePostPublished}
+            canEdit={role !== 'viewer'}
             />
             {filteredPublishedPosts.length !== publishedPosts.length && (
               <p className="text-sm text-gray-500 mt-2 text-center">

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { UUID_RE } from '@/lib/review/guards';
 import { mayUseFacebookWebhook } from '@/lib/instagram/release';
@@ -11,7 +11,8 @@ const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 // POST - Publish a scheduled post now (service role for data access): via the n8n webhook, or for
 // pages set to publish_via='app', directly with the page's own token.
 export async function POST(request: NextRequest) {
-  const { error: authError } = await requireAuth();
+  // Viewers are Internal View Only: they can see posts but not create, delete or publish them
+  const { error: authError } = await requireRole(['admin', 'manager']);
   if (authError) return authError;
 
   try {

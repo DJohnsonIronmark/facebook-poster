@@ -24,7 +24,7 @@ const err = (message: string, status = 400) => NextResponse.json({ error: messag
 const isHttpUrl = (s: string) => { try { return /^https?:$/.test(new URL(s).protocol); } catch { return false; } };
 
 /**
- * POST - workflow actions on a review batch (admin/manager)
+ * POST - workflow actions on a review batch (admin/manager; viewers only approve_internal as the account manager)
  *   { action: 'approve_internal' }   internal review done → client_review + email client magic link
  *   { action: 'resend_link' }        new client link (old one stops working) + email
  *   { action: 'final_upload', rows } bulk-apply final copy/schedule to client-approved posts
@@ -36,11 +36,16 @@ const isHttpUrl = (s: string) => { try { return /^https?:$/.test(new URL(s).prot
  * reviewers acting at once can't double-send links or double-publish.
  */
 export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
-  const { user, error: authError } = await requireRole(['admin', 'manager']);
+  // Viewers (Internal View Only, e.g. the account team) may only approve drafts for clients they are
+  // the account manager of; the approve_internal case checks that. Everything else is admin/manager.
+  const { user, error: authError } = await requireRole(['admin', 'manager', 'viewer']);
   if (authError || !user) return authError!;
   if (!UUID_RE.test(params.id)) return err('Invalid batch id');
 
   const body = await request.json().catch(() => ({}));
+  if (user.role === 'viewer' && body?.action !== 'approve_internal') {
+    return err('View-only access: you can approve drafts for your own clients, but not change campaigns', 403);
+  }
   const supabase = createServiceClient();
 
   const { data: batch, error: batchErr } = await supabase

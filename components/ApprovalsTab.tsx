@@ -10,7 +10,6 @@ import XPostPreview from './XPostPreview';
 import SocialTextMeter from './SocialTextMeter';
 import ReplaceMediaButton from './ReplaceMediaButton';
 import DeviceToggle from './DeviceToggle';
-import ClientSettings from './ClientSettings';
 import type { ReviewBatch, ReviewPost } from '@/lib/review/types';
 import { groupPosts } from '@/lib/review/grouping';
 import { validateIgCaption, PLATFORM_LABEL, rowPlatform } from '@/lib/instagram/rules';
@@ -51,20 +50,21 @@ const STAGES: { key: Stage; label: string; hint: string }[] = [
 const FINAL_HEADERS = ['post_id', 'platform', 'client', 'location_number', 'location_name', 'post_content', 'link_url', 'media_url', 'scheduled_for', 'client_comment'];
 
 interface Props {
-  canEdit: boolean;   // admin/manager
+  canEdit: boolean;   // admin/manager (viewers are Internal View Only; they may only approve their own clients' drafts)
   isAdmin: boolean;
   userEmail: string | null;
   onScheduled: () => void;
+  /** Opens the Clients tab, where clients are set up for the approval workflow */
+  onOpenClients?: () => void;
 }
 
-export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled }: Props) {
+export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled, onOpenClients }: Props) {
   const [batches, setBatches] = useState<ReviewBatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [stage, setStage] = useState<Stage>('internal_review');
   const [openId, setOpenId] = useState<string | null>(null);
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [banner, setBanner] = useState<{ kind: 'ok' | 'error'; text: string; link?: string; compose?: ComposeEmail } | null>(null);
-  const [showClients, setShowClients] = useState(false);
   const [igEnabled, setIgEnabled] = useState(false);
   // Publishing switches from GET /api/review/batches (publishing_enabled: { instagram, linkedin, x })
   const [socialStatus, setSocialStatus] = useState<SocialStatus | null>(null);
@@ -181,15 +181,13 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
         <DeviceToggle value={device} onChange={setDevice} />
         <div className="ml-auto flex gap-2">
           <button onClick={load} className="px-3 py-1.5 text-sm rounded-lg bg-white shadow-sm text-gray-700 hover:bg-gray-50">Refresh</button>
-          {isAdmin && (
-            <button onClick={() => setShowClients(!showClients)} className="px-3 py-1.5 text-sm rounded-lg bg-white shadow-sm text-gray-700 hover:bg-gray-50">
-              {showClients ? 'Hide client settings' : 'Client settings'}
+          {isAdmin && onOpenClients && (
+            <button onClick={onOpenClients} className="px-3 py-1.5 text-sm rounded-lg bg-white shadow-sm text-gray-700 hover:bg-gray-50">
+              Set up clients →
             </button>
           )}
         </div>
       </div>
-
-      {showClients && isAdmin && <ClientSettings />}
 
       {banner && (
         <div className={`rounded-lg px-4 py-3 border text-sm ${banner.kind === 'ok' ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-700'}`} role="status">
@@ -226,6 +224,14 @@ export default function ApprovalsTab({ canEdit, isAdmin, userEmail, onScheduled 
       ) : byStage[stage].length === 0 ? (
         <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
           Nothing in {STAGES.find((s) => s.key === stage)!.label.toLowerCase()}.
+          {stage === 'internal_review' && (
+            <p className="mt-2 text-sm">
+              Drafts land here for clients with the approval workflow turned on.{' '}
+              {isAdmin && onOpenClients
+                ? <button onClick={onOpenClients} className="text-blue-600 hover:underline">Set up a client</button>
+                : 'An admin can set up clients on the Clients tab.'}
+            </p>
+          )}
         </div>
       ) : (
         byStage[stage].map((batch) => (
@@ -375,7 +381,8 @@ function BatchCard({
           </div>
         </button>
 
-        {canEdit && (
+        {/* Internal View Only (viewer) accounts see actions only to approve their own clients' drafts */}
+        {(canEdit || (isAccountManager && batch.status === 'internal_review')) && (
           <div className="flex flex-wrap items-center gap-2">
             {confirm ? (
               <>
@@ -427,7 +434,9 @@ function BatchCard({
                     Schedule {releasable.length} post{releasable.length === 1 ? '' : 's'}
                   </button>
                 )}
-                <button onClick={() => setConfirm('cancel')} className="px-3 py-1.5 text-sm rounded-lg bg-red-50 text-red-700 hover:bg-red-100">Cancel</button>
+                {canEdit && (
+                  <button onClick={() => setConfirm('cancel')} className="px-3 py-1.5 text-sm rounded-lg bg-red-50 text-red-700 hover:bg-red-100">Cancel</button>
+                )}
               </>
             )}
           </div>

@@ -629,6 +629,7 @@ export default function PostForm({ pages, onPostCreated }: PostFormProps) {
           ? 'These drafts get their own campaign and review link.'
           : 'Added to the client\'s open campaign if one is still in internal review (one review link); otherwise a new campaign. The name only applies to a new campaign.'}
       </span>
+      <a href="/?tab=clients" className="text-xs text-blue-700 underline whitespace-nowrap">Client setup</a>
     </div>
   );
 

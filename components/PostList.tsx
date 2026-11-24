@@ -12,6 +12,8 @@ interface PostListProps {
   showPublishButton: boolean;
   onPostDeleted: (postId: string) => void;
   onPostPublished: (postId: string) => void;
+  /** false for Internal View Only (viewer) accounts: hides Publish Now and Delete */
+  canEdit?: boolean;
 }
 
 export default function PostList({
@@ -21,6 +23,7 @@ export default function PostList({
   showPublishButton,
   onPostDeleted,
   onPostPublished,
+  canEdit = true,
 }: PostListProps) {
   const [publishingId, setPublishingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -229,7 +232,7 @@ export default function PostList({
                   </a>
                 )}
                 {/* "Publish now" goes through the Facebook webhook; other platforms publish on schedule only */}
-                {showPublishButton && (post.platform || 'facebook') === 'facebook' && post.status === 'pending' && (
+                {canEdit && showPublishButton && (post.platform || 'facebook') === 'facebook' && post.status === 'pending' && (
                   <button
                     onClick={() => handlePublish(post)}
                     disabled={publishingId === post.id}
@@ -248,13 +251,15 @@ export default function PostList({
                     )}
                   </button>
                 )}
-                <button
-                  onClick={() => handleDelete(post.id)}
-                  disabled={deletingId === post.id}
-                  className="px-3 py-1.5 bg-red-100 text-red-700 text-sm rounded-lg hover:bg-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {deletingId === post.id ? 'Deleting...' : 'Delete'}
-                </button>
+                {canEdit && (
+                  <button
+                    onClick={() => handleDelete(post.id)}
+                    disabled={deletingId === post.id}
+                    className="px-3 py-1.5 bg-red-100 text-red-700 text-sm rounded-lg hover:bg-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {deletingId === post.id ? 'Deleting...' : 'Delete'}
+                  </button>
+                )}
               </div>
             </div>
           </div>

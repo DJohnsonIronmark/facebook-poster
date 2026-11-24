@@ -31,7 +31,9 @@ interface PageRow {
   fb_publish_problem?: string | null;
 }
 interface ClientOpt { id: string; name: string }
-interface FbPage { id: string; name: string; picture: string | null; location: string | null; already_added: boolean }
+// display_name = the name with Facebook's location descriptor, e.g. "Home Instead (Smithtown, NY)"
+interface FbPage { id: string; name: string; display_name?: string; picture: string | null; location: string | null; already_added: boolean }
+const fbName = (p: FbPage) => p.display_name || p.name;
 
 const FB_FLAG_MESSAGES: Record<string, { kind: 'ok' | 'error'; text: string }> = {
   connected: { kind: 'ok', text: 'Connected to Facebook. Pick the pages to import below.' },
@@ -255,8 +257,46 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
 
   const importFacebook = async () => {
     const chosen = fbPages.filter((p) => fbSelected.includes(p.id));
-    const ok = await submit(chosen.map((p) => ({ facebook_page_id: p.id, location_name: p.name })), 'facebook');
+    const ok = await submit(chosen.map((p) => ({ facebook_page_id: p.id, location_name: fbName(p) })), 'facebook');
     if (ok) { fbLoadRun.current++; setFbLoadingMore(false); setFbResumeAfter(null); setFbPages([]); setFbSelected([]); setFbSearch(''); setMode('none'); }
+  };
+
+  // Pages added before location names were pulled in still carry Facebook's plain name (e.g. every
+  // location is "Home Instead"). Offer to rename only those whose name is still exactly the plain
+  // Facebook name, so names someone edited are never touched.
+  const renamable = useMemo(() => {
+    const byFbId = new Map(fbPages.map((p) => [p.id, p]));
+    return pages.flatMap((row) => {
+      const fb = byFbId.get(row.facebook_page_id);
+      if (!fb) return [];
+      const better = fbName(fb);
+      return better !== fb.name && row.location_name.trim() === fb.name.trim() ? [{ row, name: better }] : [];
+    });
+  }, [pages, fbPages]);
+
+  const renameAddedPages = async () => {
+    setSaving(true);
+    setMessage(null);
+    let done = 0;
+    const failed: string[] = [];
+    for (const { row, name } of renamable) {
+      // A details PATCH replaces every detail field, so send the page's current values with the new name
+      const res = await fetch('/api/pages', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: row.id, location_name: name, location_number: row.location_number || '', city: row.city || '',
+          base_url: row.base_url || '', phone: row.phone || '', ig_user_id: row.ig_user_id || '', ig_username: row.ig_username || '',
+        }),
+      }).catch(() => null);
+      if (res?.ok) done++; else failed.push(name);
+    }
+    setSaving(false);
+    setMessage({
+      kind: failed.length ? 'error' : 'ok',
+      text: `Renamed ${done} page(s) to their Facebook location names.${failed.length ? ` Failed: ${failed.slice(0, 5).join('; ')}${failed.length > 5 ? '…' : ''}` : ''}`,
+    });
+    await load();
+    onPagesChanged();
   };
 
   const disconnect = async () => {
@@ -274,10 +314,10 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
       .filter((p) => !(fbHideAdded && p.already_added))
       .filter((p) => {
         if (words.length === 0) return true;
-        const hay = `${p.name} ${p.id} ${p.location || ''}`.toLowerCase();
+        const hay = `${fbName(p)} ${p.id} ${p.location || ''}`.toLowerCase();
         return words.every((w) => hay.includes(w));
       })
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      .sort((a, b) => fbName(a).localeCompare(fbName(b), undefined, { sensitivity: 'base' }));
   }, [fbPages, fbSearch, fbHideAdded]);
   const visibleImportableIds = fbVisible.filter((p) => !p.already_added).map((p) => p.id);
   const allVisibleSelected = visibleImportableIds.length > 0 && visibleImportableIds.every((id) => fbSelected.includes(id));
@@ -393,6 +433,18 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
               </span>
               <button onClick={disconnect} className="text-gray-500 hover:underline">Disconnect</button>
             </div>
+            {renamable.length > 0 && (
+              <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b bg-amber-50 text-sm text-amber-900" role="status">
+                <span className="mr-auto">
+                  {renamable.length} page{renamable.length === 1 ? '' : 's'} you already added {renamable.length === 1 ? 'has' : 'have'} only the plain
+                  Facebook name (e.g. &quot;{renamable[0].row.location_name}&quot;). Add the location, e.g. &quot;{renamable[0].name}&quot;?
+                </span>
+                <button onClick={renameAddedPages} disabled={saving}
+                  className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-sm font-medium disabled:opacity-50">
+                  {saving ? 'Renaming…' : `Rename ${renamable.length} page${renamable.length === 1 ? '' : 's'}`}
+                </button>
+              </div>
+            )}
             {fbPages.length > 0 && (
               <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b text-sm">
                 <input type="search" value={fbSearch} autoFocus
@@ -428,11 +480,11 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
                 <li key={p.id} className="flex items-center gap-3 px-3 py-2">
                   <input type="checkbox" disabled={p.already_added} checked={fbSelected.includes(p.id)}
                     onChange={(e) => setFbSelected(e.target.checked ? [...fbSelected, p.id] : fbSelected.filter((x) => x !== p.id))}
-                    className="w-4 h-4" aria-label={`Select ${p.name}`} />
+                    className="w-4 h-4" aria-label={`Select ${fbName(p)}`} />
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   {p.picture ? <img src={p.picture} alt="" className="w-8 h-8 rounded-full" /> : <div className="w-8 h-8 rounded-full bg-gray-200" />}
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-gray-900 truncate">{p.name}</div>
+                    <div className="text-sm font-medium text-gray-900 truncate">{fbName(p)}</div>
                     <div className="text-xs text-gray-500">{p.id}{p.location ? ` · ${p.location}` : ''}</div>
                   </div>
                   {p.already_added && <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Already added</span>}
@@ -452,7 +504,7 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
                 {saving ? 'Importing…' : `Import ${fbSelected.length} page${fbSelected.length === 1 ? '' : 's'}`}
               </button>
             </div>
-            <p className="px-3 pb-3 text-xs text-gray-500">Imported pages use their Facebook name. Add city, website and phone afterwards with Edit for placeholders.</p>
+            <p className="px-3 pb-3 text-xs text-gray-500">Imported pages use their Facebook name with its location, e.g. &quot;Home Instead (Smithtown, NY)&quot;. Add city, website and phone afterwards with Edit for placeholders.</p>
           </div>
         )}
       </div>
