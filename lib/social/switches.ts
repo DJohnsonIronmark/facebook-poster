@@ -20,7 +20,8 @@ export function xPublishingEnabled(): boolean {
 
 export function publishingSwitches(): PublishingSwitches {
   return {
-    instagram: isSwitchOn(process.env.INSTAGRAM_PUBLISHING_ENABLED),
+    // n8n or the app itself publishes Instagram (approval Schedule releases Instagram rows when either is on)
+    instagram: isSwitchOn(process.env.INSTAGRAM_PUBLISHING_ENABLED) || isSwitchOn(process.env.INSTAGRAM_APP_PUBLISHING_ENABLED),
     linkedin: linkedinPublishingEnabled(),
     x: xPublishingEnabled(),
   };
