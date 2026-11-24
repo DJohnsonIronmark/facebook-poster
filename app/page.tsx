@@ -9,6 +9,7 @@ import ApprovalsTab from '@/components/ApprovalsTab';
 import PagesManager from '@/components/PagesManager';
 import ClientSettings from '@/components/ClientSettings';
 import PostCalendar from '@/components/PostCalendar';
+import AnalyticsTab from '@/components/AnalyticsTab';
 import LinkInBioTab from '@/components/LinkInBioTab';
 import InboxTab from '@/components/InboxTab';
 import { createClient } from '@/lib/supabase/client';
@@ -60,7 +61,7 @@ export default function Home() {
   const [pages, setPages] = useState<FacebookPage[]>([]);
   const [posts, setPosts] = useState<ScheduledPost[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'inbox' | 'bio' | 'pages' | 'clients'>('create');
+  const [activeTab, setActiveTab] = useState<'create' | 'approvals' | 'scheduled' | 'published' | 'analytics' | 'inbox' | 'bio' | 'pages' | 'clients'>('create');
   const [filters, setFilters] = useState<FilterState>({ location: '', dateFrom: '', dateTo: '' });
   // Scheduled tab: list or month calendar (remembered per browser)
   const [scheduledView, setScheduledView] = useState<'list' | 'calendar'>('list');
@@ -93,7 +94,7 @@ export default function Home() {
   // Deep link from notification emails: /?tab=approvals
   useEffect(() => {
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published' || tab === 'inbox' || tab === 'bio' || tab === 'pages' || tab === 'clients') setActiveTab(tab);
+    if (tab === 'approvals' || tab === 'scheduled' || tab === 'published' || tab === 'inbox' || tab === 'bio' || tab === 'pages' || tab === 'clients' || tab === 'analytics') setActiveTab(tab);
   }, []);
 
   const handleLogout = async () => {
@@ -280,6 +281,16 @@ export default function Home() {
               Inbox
             </button>
             <button
+              onClick={() => setActiveTab('analytics')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'analytics'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Analytics
+            </button>
+            <button
               onClick={() => setActiveTab('bio')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'bio'
@@ -324,6 +335,9 @@ export default function Home() {
         )}
         {activeTab === 'pages' && (role === 'admin' || role === 'manager') && (
           <PagesManager onPagesChanged={fetchPages} />
+        )}
+        {activeTab === 'analytics' && (
+          <AnalyticsTab clients={clients} pages={pages} />
         )}
         {activeTab === 'clients' && role === 'admin' && (
           <div className="space-y-4">
