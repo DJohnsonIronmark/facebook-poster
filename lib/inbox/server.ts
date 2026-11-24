@@ -1,7 +1,7 @@
 import { createHmac } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { isSwitchOn } from '@/lib/instagram/rules';
-import { GRAPH_VERSION } from '@/lib/facebook/oauth';
+import { GRAPH_VERSION, pageDisplayName } from '@/lib/facebook/oauth';
 import { decryptToken, encryptToken } from '@/lib/social/crypto';
 import {
   conversationItems, facebookCommentItems, instagramCommentItems, type InboxItem, type InboxKind, type InboxPlatform,
@@ -133,7 +133,7 @@ export async function appPagesWithTokens(supabase: SupabaseClient, userToken: st
   const runChunk = async (chunk: string[]) => {
     const batch = chunk.map((id) => ({
       method: 'GET',
-      relative_url: `${id}?fields=id,name,access_token,instagram_business_account{id,username}`,
+      relative_url: `${id}?fields=id,name,name_with_location_descriptor,store_location_descriptor,access_token,instagram_business_account{id,username}`,
     }));
     const results = await graph('', userToken, { batch: JSON.stringify(batch), include_headers: 'false' }, 'POST', 60_000);
     if (!Array.isArray(results)) return;
@@ -145,7 +145,8 @@ export async function appPagesWithTokens(supabase: SupabaseClient, userToken: st
       if (!p?.id || typeof p.access_token !== 'string') continue;
       out.push({
         facebook_page_id: String(p.id),
-        page_name: String(p.name || ''),
+        // With the location descriptor, e.g. "Home Instead (Smithtown, NY)", so locations of one brand differ
+        page_name: pageDisplayName(p),
         access_token: p.access_token,
         ig_user_id: p.instagram_business_account?.id ? String(p.instagram_business_account.id) : null,
         ig_username: p.instagram_business_account?.username ? String(p.instagram_business_account.username) : null,
@@ -216,10 +217,30 @@ export interface ConnectedPage {
 
 const TOKEN_COLUMNS = 'facebook_page_id, page_name, ig_user_id, ig_username, status, scopes, last_error, connected_by, updated_at';
 
+/**
+ * The page names the team uses (facebook_pages.location_name, e.g. "Home Instead (Smithtown, NY)"),
+ * keyed by Facebook page ID. Stored tokens keep the name Facebook gave at connect time, which for
+ * location pages of one brand is often just the brand.
+ */
+async function appPageNames(supabase: SupabaseClient, facebookPageIds: string[]): Promise<Map<string, string>> {
+  if (facebookPageIds.length === 0) return new Map();
+  const { data } = await supabase.from('facebook_pages').select('facebook_page_id, location_name').in('facebook_page_id', facebookPageIds);
+  const names = new Map<string, string>();
+  for (const r of (data || []) as { facebook_page_id: string; location_name: string | null }[]) {
+    const name = String(r.location_name || '').trim();
+    if (name && !names.has(String(r.facebook_page_id))) names.set(String(r.facebook_page_id), name);
+  }
+  return names;
+}
+
 export async function listConnectedPages(supabase: SupabaseClient): Promise<ConnectedPage[]> {
   const { data, error } = await supabase.from('fb_page_tokens').select(TOKEN_COLUMNS).neq('status', 'disconnected').order('page_name');
   if (error) throw Object.assign(new Error(error.message), { code: error.code });
-  return (data || []).map((r: any) => ({ ...r, scopes: String(r.scopes || '').split(',').filter(Boolean) }));
+  const rows = (data || []) as any[];
+  const names = await appPageNames(supabase, rows.map((r) => String(r.facebook_page_id)));
+  return rows
+    .map((r) => ({ ...r, page_name: names.get(String(r.facebook_page_id)) || r.page_name, scopes: String(r.scopes || '').split(',').filter(Boolean) }))
+    .sort((a, b) => String(a.page_name).localeCompare(String(b.page_name), undefined, { sensitivity: 'base' }));
 }
 
 export async function pageToken(supabase: SupabaseClient, facebookPageId: string): Promise<{ token: string; page: ConnectedPage } | null> {
@@ -250,7 +271,8 @@ export async function fetchPageInbox(supabase: SupabaseClient, facebookPageId: s
   const conn = await pageToken(supabase, facebookPageId);
   if (!conn) return { items: [], errors: ['This page needs to be connected for the inbox (or reconnected).'] };
   const { token, page } = conn;
-  const ctx = { facebook_page_id: page.facebook_page_id, page_name: page.page_name, ig_user_id: page.ig_user_id, ig_username: page.ig_username };
+  const appName = (await appPageNames(supabase, [page.facebook_page_id])).get(page.facebook_page_id);
+  const ctx = { facebook_page_id: page.facebook_page_id, page_name: appName || page.page_name, ig_user_id: page.ig_user_id, ig_username: page.ig_username };
   const since = String(Math.floor(Date.now() / 1000) - SINCE_DAYS * 86400);
 
   const jobs: { label: string; run: () => Promise<InboxItem[]> }[] = [];
