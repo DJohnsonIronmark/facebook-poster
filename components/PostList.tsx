@@ -54,19 +54,24 @@ export default function PostList({
     }
   };
 
-  const handleDelete = async (postId: string) => {
-    if (!confirm('Are you sure you want to delete this post?')) return;
+  // fromPlatform: also delete the published post on Facebook / Instagram (the app record is removed
+  // only after the platform confirms). Without it, only the app's record goes.
+  const handleDelete = async (postId: string, fromPlatform: string | null = null) => {
+    const question = fromPlatform
+      ? `Delete this post from ${fromPlatform}? It will be removed from the live ${fromPlatform} account and from this list. This can't be undone.`
+      : 'Remove this post from the app? (A post that is already published stays live on the platform.)';
+    if (!confirm(question)) return;
 
     setError(null);
     setDeletingId(postId);
 
     try {
-      const response = await fetch(`/api/posts?id=${postId}`, {
+      const response = await fetch(`/api/posts?id=${postId}${fromPlatform ? '&from_platform=1' : ''}`, {
         method: 'DELETE',
       });
 
       if (!response.ok) {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         throw new Error(data.error || 'Failed to delete post');
       }
 
@@ -251,13 +256,27 @@ export default function PostList({
                     )}
                   </button>
                 )}
+                {canEdit && post.status === 'published' && post.facebook_post_id
+                  && ((post.platform || 'facebook') === 'facebook' || post.platform === 'instagram') && (() => {
+                  const where = post.platform === 'instagram' ? 'Instagram' : 'Facebook';
+                  return (
+                    <button
+                      onClick={() => handleDelete(post.id, where)}
+                      disabled={deletingId === post.id}
+                      className="px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {deletingId === post.id ? 'Deleting...' : `Delete from ${where}`}
+                    </button>
+                  );
+                })()}
                 {canEdit && (
                   <button
                     onClick={() => handleDelete(post.id)}
                     disabled={deletingId === post.id}
+                    title={post.status === 'published' ? 'Removes it from this app only; the published post stays live' : undefined}
                     className="px-3 py-1.5 bg-red-100 text-red-700 text-sm rounded-lg hover:bg-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {deletingId === post.id ? 'Deleting...' : 'Delete'}
+                    {deletingId === post.id ? 'Deleting...' : post.status === 'published' ? 'Remove from list' : 'Delete'}
                   </button>
                 )}
               </div>

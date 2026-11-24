@@ -5,6 +5,9 @@ import { UUID_RE } from '@/lib/review/guards';
 import { mayUseFacebookWebhook } from '@/lib/instagram/release';
 import { facebookAppPublishingEnabled } from '@/lib/social/switches';
 import { claimAndPublishFacebook, type FacebookPostRow } from '@/lib/facebook/publish';
+import { claimAndPublishInstagram, instagramAppPublishingEnabled } from '@/lib/instagram/appPublish';
+
+export const maxDuration = 300;
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -41,6 +44,12 @@ export async function POST(request: NextRequest) {
         { error: `${post.platform === 'x' ? 'X' : 'LinkedIn'} posts can't be published immediately; schedule them instead (they publish at their scheduled time).` },
         { status: 400 }
       );
+    }
+    // Instagram published by the app itself (never the Facebook webhook)
+    if (post.platform === 'instagram' && instagramAppPublishingEnabled()) {
+      const result = await claimAndPublishInstagram(supabase, post);
+      if (result.ok) return NextResponse.json({ success: true, message: 'Published to Instagram' });
+      return NextResponse.json({ error: result.error }, { status: 502 });
     }
     if (!mayUseFacebookWebhook(post)) {
       return NextResponse.json({ error: 'Instagram posts cannot be published from here; they publish at their scheduled time.' }, { status: 409 });

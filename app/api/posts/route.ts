@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+
+// Instagram publishing waits for Instagram to process the media
+export const maxDuration = 300;
 import { requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { replacePlaceholders } from '@/lib/placeholders';
@@ -10,6 +13,8 @@ import { cleanBioUrl } from '@/lib/bio/rules';
 import { directPostDecision } from '@/lib/instagram/release';
 import { instagramPublishingEnabled, instagramRowProblem } from '@/lib/instagram/server';
 import { facebookAppPublishingEnabled, linkedinPublishingEnabled, xPublishingEnabled } from '@/lib/social/switches';
+import { deleteFromPlatform } from '@/lib/social/platformDelete';
+import { claimAndPublishInstagram, instagramAppPublishingEnabled } from '@/lib/instagram/appPublish';
 import { claimAndPublishFacebook, pagePublishVia, type FacebookPostRow } from '@/lib/facebook/publish';
 import {
   attachSocialIdentities, isSocialPlatform, loadConnectionsLite, loadPageMappings, pageSocialProblem, pickMappingFor,
@@ -75,7 +80,10 @@ export async function POST(request: NextRequest) {
     const decision = directPostDecision({
       platform, publishNow: !!publish_now, instagramEnabled: instagramPublishingEnabled(),
       linkedinEnabled: linkedinPublishingEnabled(), xEnabled: xPublishingEnabled(),
+      instagramAppPublishing: instagramAppPublishingEnabled(),
     });
+    // Instagram "publish now" by the app itself (INSTAGRAM_APP_PUBLISHING_ENABLED)
+    const igAppPublishNow = platform === 'instagram' && instagramAppPublishingEnabled() && !!publish_now;
     if (!decision.ok) return NextResponse.json({ error: decision.error }, { status: decision.status });
     const postGroupId = body.post_group_id ? String(body.post_group_id) : null;
     if (postGroupId && !UUID_RE.test(postGroupId)) return NextResponse.json({ error: 'Invalid post_group_id' }, { status: 400 });
@@ -98,7 +106,7 @@ export async function POST(request: NextRequest) {
       if (isNaN(d.getTime())) return NextResponse.json({ error: 'Invalid schedule date' }, { status: 400 });
       scheduledIso = d.toISOString();
     }
-    if (platform !== 'facebook' && !scheduledIso) {
+    if (platform !== 'facebook' && !scheduledIso && !igAppPublishNow) {
       const label = platform === 'instagram' ? 'Instagram' : platform === 'linkedin' ? 'LinkedIn' : 'X';
       return NextResponse.json({ error: `${label} posts need a schedule date` }, { status: 400 });
     }
@@ -164,9 +172,9 @@ export async function POST(request: NextRequest) {
         post_content: processedContent,
         link_url: processedLinkUrl || null,
         // app "publish now": stored as due now, then claimed and published below
-        scheduled_for: appPublishNow ? new Date().toISOString() : scheduledIso,
-        status: publish_now && !appPublishNow ? 'published' : 'pending',
-        published_at: publish_now && !appPublishNow ? new Date().toISOString() : null,
+        scheduled_for: appPublishNow || igAppPublishNow ? new Date().toISOString() : scheduledIso,
+        status: publish_now && !appPublishNow && !igAppPublishNow ? 'published' : 'pending',
+        published_at: publish_now && !appPublishNow && !igAppPublishNow ? new Date().toISOString() : null,
         media_url: publicMediaUrl,
         media_type: mediaType,
         platform,
@@ -178,6 +186,14 @@ export async function POST(request: NextRequest) {
     if (insertErr || !saved) {
       console.error('posts POST insert', insertErr);
       return NextResponse.json({ error: 'Failed to save post' }, { status: 500 });
+    }
+
+    if (igAppPublishNow) {
+      const result = await claimAndPublishInstagram(supabase, saved);
+      if (result.ok) {
+        return NextResponse.json({ success: true, message: 'Published to Instagram', post: { ...saved, status: 'published', facebook_post_id: result.mediaId } });
+      }
+      return NextResponse.json({ error: `Instagram post saved but not published: ${result.error}` }, { status: 502 });
     }
 
     if (appPublishNow) {
@@ -240,10 +256,27 @@ export async function DELETE(request: NextRequest) {
   }
 
   const supabase = createServiceClient();
+
+  // ?from_platform=1: delete the published post on Facebook / Instagram first; the app's record is
+  // only removed once the platform has deleted it, so a refusal never leaves a live post untracked.
+  const fromPlatform = new URL(request.url).searchParams.get('from_platform') === '1';
+  let alreadyGone = false;
+  if (fromPlatform) {
+    const { data: post } = await supabase.from('facebook_scheduled_posts')
+      .select('id, status, platform, facebook_page_id, facebook_post_id').eq('id', postId).maybeSingle();
+    if (!post) return NextResponse.json({ error: 'Post not found' }, { status: 404 });
+    if (post.status !== 'published') {
+      return NextResponse.json({ error: 'Only published posts can be deleted from Facebook / Instagram' }, { status: 409 });
+    }
+    const result = await deleteFromPlatform(supabase, post);
+    if (!result.ok) return NextResponse.json({ error: result.message }, { status: result.status });
+    alreadyGone = result.alreadyGone;
+  }
+
   const { error } = await supabase.from('facebook_scheduled_posts').delete().eq('id', postId);
   if (error) {
     console.error('posts DELETE', error);
-    return NextResponse.json({ error: 'Failed to delete post' }, { status: 500 });
+    return NextResponse.json({ error: fromPlatform ? 'Deleted from the platform, but failed to remove it from the app; refresh and remove it from the list' : 'Failed to delete post' }, { status: 500 });
   }
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, deleted_from_platform: fromPlatform, already_gone: alreadyGone });
 }
