@@ -43,7 +43,6 @@ export async function runScheduledPublishing(supabase: SupabaseClient): Promise<
     .update({ status: 'failed', publish_error: INTERRUPTED })
     .eq('status', 'publishing')
     .eq('platform', 'facebook')
-    .eq('publish_via', 'app')
     .lt('publish_started_at', new Date(started - STALE_MS).toISOString())
     .select('id');
   if (staleFbErr) console.error('social-run: facebook stale sweep', staleFbErr.message);
@@ -65,7 +64,7 @@ export async function runScheduledPublishing(supabase: SupabaseClient): Promise<
   const facebookOn = facebookAppPublishingEnabled();
   const instagramOn = instagramAppPublishingEnabled();
 
-  // Facebook (publish_via='app') first: these have an exact scheduled time, LinkedIn/X follow
+  // Facebook first: these have an exact scheduled time, LinkedIn/X follow
   if (facebookOn) {
     const { data: fbDue, error: fbErr } = await supabase
       .from('facebook_scheduled_posts')

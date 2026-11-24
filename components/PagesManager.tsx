@@ -328,7 +328,6 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
 
   const afterMappingSaved = async () => { await load(); onPagesChanged(); };
   const appPublishingOn = !!socialStatus?.facebook_app.enabled;
-  const pagesOnApp = pages.filter((p) => p.publish_via === 'app').length;
 
   return (
     <div className="space-y-4">
@@ -365,16 +364,14 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
           </button>
         </div>
 
-        <p className="text-xs text-gray-500 bg-amber-50 border border-amber-100 rounded px-3 py-2">
-          Pages set to <strong>n8n</strong> publish with the n8n Facebook connection, not this sign-in: a new page only publishes if
-          that connection&apos;s Facebook account also has access to the page (e.g. through Business Manager).
-          {appPublishingOn && <> Pages set to <strong>App</strong> publish with their own access, saved by &ldquo;Connect pages for publishing&rdquo;.</>}
+        <p className="text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded px-3 py-2">
+          Every page publishes from this app with its own access. After adding pages, use <strong>Inbox → Connect pages</strong> (signed
+          in as someone who manages them) so each page shows &ldquo;ready to publish&rdquo;.
         </p>
 
-        {socialStatus && !appPublishingOn && pagesOnApp > 0 && (
+        {socialStatus && !appPublishingOn && (
           <div className="text-sm rounded px-3 py-2 bg-red-50 text-red-700" role="alert">
-            App publishing is turned off, but {pagesOnApp} page(s) are set to publish from the app. Their posts will wait until it&apos;s
-            turned back on. To publish them through n8n instead, an admin can switch those pages back to n8n.
+            Facebook publishing is turned off (FACEBOOK_APP_PUBLISHING_ENABLED), so no Facebook posts will publish until it&apos;s turned back on.
           </div>
         )}
 
@@ -533,9 +530,7 @@ export default function PagesManager({ onPagesChanged }: { onPagesChanged: () =>
                   Page ID {p.facebook_page_id}{p.city ? ` · ${p.city}` : ''}{p.client_id ? ` · ${clientName.get(p.client_id) || 'client'}` : ''}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1">
-                  {(appPublishingOn || p.publish_via === 'app') && (
-                    <FacebookPublishCell page={p} isAdmin={isAdmin} appPublishingOn={appPublishingOn} onSaved={afterMappingSaved} />
-                  )}
+                  <FacebookPublishCell page={p} />
                   <LinkedInMappingCell page={p} connections={connections} isAdmin={isAdmin} loadOrgs={loadOrgs} onSaved={afterMappingSaved} />
                   <XMappingCell page={p} connections={connections} isAdmin={isAdmin} onSaved={afterMappingSaved} />
                 </div>
@@ -608,57 +603,19 @@ function EditRow({ page, onDone }: { page: PageRow; onDone: (saved: boolean) => 
   );
 }
 
-/** Facebook: who publishes this page (n8n's shared connection, or the app with the page's own access). */
-function FacebookPublishCell({ page, isAdmin, appPublishingOn, onSaved }: {
-  page: PageRow; isAdmin: boolean; appPublishingOn: boolean; onSaved: () => void | Promise<void>;
-}) {
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const via = page.publish_via === 'app' ? 'app' : 'n8n';
+/** Facebook: whether the app can publish to this page (every page publishes from the app with its own access). */
+function FacebookPublishCell({ page }: { page: PageRow }) {
   const status = page.fb_publish_ready
-    ? { text: 'connected', cls: 'text-green-700' }
+    ? { text: 'ready to publish', cls: 'text-green-700' }
     : page.fb_token_status === 'needs_reauth'
-      ? { text: 'reconnect needed', cls: 'text-red-700' }
+      ? { text: 'reconnect needed (Inbox → Connect pages)', cls: 'text-red-700' }
       : page.fb_token_status
-        ? { text: 'missing posting permission', cls: 'text-amber-700' }
-        : { text: 'not connected', cls: 'text-gray-500' };
-
-  const change = async (next: 'n8n' | 'app') => {
-    if (next === via) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/pages', {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: page.id, publish_via: next }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { setError(typeof data.error === 'string' ? data.error : 'Could not change the publisher'); return; }
-      await onSaved();
-    } catch {
-      setError('Could not change the publisher');
-    } finally {
-      setSaving(false);
-    }
-  };
-
+        ? { text: 'missing posting permission (Inbox → Connect pages)', cls: 'text-amber-700' }
+        : { text: 'not connected (Inbox → Connect pages)', cls: 'text-red-700' };
   return (
     <div className="text-xs text-gray-600 flex flex-wrap items-center gap-2">
-      <span className="font-medium text-gray-700">Facebook publishes via</span>
-      {isAdmin ? (
-        <select value={via} disabled={saving} onChange={(e) => change(e.target.value === 'app' ? 'app' : 'n8n')}
-          aria-label={`Facebook publisher for ${page.location_name}`}
-          className="border border-gray-300 rounded px-1.5 py-0.5 text-xs">
-          <option value="n8n">n8n</option>
-          <option value="app" disabled={!appPublishingOn || !page.fb_publish_ready}
-            title={!appPublishingOn ? 'App publishing is turned off' : page.fb_publish_problem || ''}>
-            App
-          </option>
-        </select>
-      ) : (
-        <span className="font-semibold">{via === 'app' ? 'App' : 'n8n'}</span>
-      )}
-      <span className={status.cls} title={page.fb_publish_problem || ''}>({status.text})</span>
-      {error && <span className="text-red-700" role="alert">{error}</span>}
+      <span className="font-medium text-gray-700">Facebook publishing</span>
+      <span className={status.cls} title={page.fb_publish_problem || ''}>{status.text}</span>
     </div>
   );
 }
