@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { filterByPage, requireScopedUser } from '@/lib/access';
 import { requireAuth } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { fetchPageInbox, inboxEnabled, listConnectedPages, type ConnectedPage } from '@/lib/inbox/server';
@@ -43,6 +44,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Failed to load connected pages' }, { status: 500 });
   }
 
+  {
+    const scoped = await requireScopedUser();
+    if (scoped.error) return scoped.error;
+    pages = filterByPage(scoped.scope, pages);   // only pages this user can access on Facebook
+  }
   if (!pageParam) return NextResponse.json({ enabled: true, pages, items: [] });
   if (pageParam !== 'all' && !FB_PAGE_ID_RE.test(pageParam)) return NextResponse.json({ error: 'Invalid page' }, { status: 400 });
   const active = pages.filter((p) => p.status === 'active');

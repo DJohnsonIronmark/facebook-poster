@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, noPageAccess, requireScopedUser } from '@/lib/access';
 import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { generateReviewToken } from '@/lib/review/tokens';
@@ -53,6 +54,11 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     .eq('id', params.id)
     .single();
   if (batchErr || !batch) return err('Batch not found', 404);
+  {
+    const scoped = await requireScopedUser();
+    if (scoped.error) return scoped.error;
+    if ((batch.posts || []).some((p: any) => !canSeePage(scoped.scope, p.facebook_page_id))) return noPageAccess();
+  }
 
   const now = new Date().toISOString();
   const posts: any[] = batch.posts || [];

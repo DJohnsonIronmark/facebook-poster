@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, noPageAccess, requireScopedUser } from '@/lib/access';
 import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { fetchLinkPreview } from '@/lib/review/linkPreview';
@@ -26,6 +27,11 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
 
   const { supabase, post } = await loadPost(params.id);
   if (!post || !post.review_batch_id) return NextResponse.json({ error: 'Post not found' }, { status: 404 });
+  {
+    const scoped = await requireScopedUser(['admin', 'manager']);
+    if (scoped.error) return scoped.error;
+    if (!canSeePage(scoped.scope, post.facebook_page_id)) return noPageAccess();
+  }
   if (!EDITABLE.includes(post.status)) {
     return NextResponse.json({ error: post.status === 'client_review' ? 'Locked while the client is reviewing' : 'Post is no longer in review' }, { status: 409 });
   }
@@ -94,6 +100,11 @@ export async function DELETE(_request: NextRequest, { params }: { params: { id: 
 
   const { supabase, post } = await loadPost(params.id);
   if (!post || !post.review_batch_id) return NextResponse.json({ error: 'Post not found' }, { status: 404 });
+  {
+    const scoped = await requireScopedUser(['admin', 'manager']);
+    if (scoped.error) return scoped.error;
+    if (!canSeePage(scoped.scope, post.facebook_page_id)) return noPageAccess();
+  }
   if (!['internal_review', 'client_review', 'client_approved'].includes(post.status)) {
     return NextResponse.json({ error: 'Post is already scheduled' }, { status: 409 });
   }

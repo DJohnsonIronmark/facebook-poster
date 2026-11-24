@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireRole } from '@/lib/auth';
+import { requireAuth, requireRole } from '@/lib/auth';
 import { GRAPH_VERSION, STATE_COOKIE, cookieOptions, facebookConfigured, newState, redirectUri } from '@/lib/facebook/oauth';
 import { pageConnectEnabled, pageConnectScopes, type ConnectPurpose } from '@/lib/facebook/publish';
 
@@ -8,15 +8,33 @@ import { pageConnectEnabled, pageConnectScopes, type ConnectPurpose } from '@/li
 //   ?purpose=publish → stores each page's token for app publishing (FACEBOOK_APP_PUBLISHING_ENABLED)
 // Either way the login asks for every permission currently switched on (one token per page).
 export async function GET(request: NextRequest) {
+  const origin = new URL(request.url).origin;
+  const raw = new URL(request.url).searchParams.get('purpose');
+
+  // ?purpose=access → "Verify my page access": any signed-in user (viewers too). Only lists which of
+  // the app's pages their own Facebook login manages; no page tokens are stored.
+  if (raw === 'access') {
+    const { error } = await requireAuth();
+    if (error) return error;
+    if (!facebookConfigured()) return NextResponse.redirect(new URL('/?access=not_configured', origin));
+    const state = `access.${newState()}`;
+    const dialog = new URL(`https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`);
+    dialog.searchParams.set('client_id', process.env.FACEBOOK_APP_ID!);
+    dialog.searchParams.set('redirect_uri', redirectUri(origin));
+    dialog.searchParams.set('state', state);
+    dialog.searchParams.set('response_type', 'code');
+    dialog.searchParams.set('scope', 'pages_show_list,business_management');
+    const res = NextResponse.redirect(dialog);
+    res.cookies.set(STATE_COOKIE, state, cookieOptions(10 * 60));
+    return res;
+  }
+
   const { error: authError } = await requireRole(['admin', 'manager']);
   if (authError) return authError;
-
-  const origin = new URL(request.url).origin;
   if (!facebookConfigured()) {
     return NextResponse.redirect(new URL('/?tab=pages&fb=not_configured', origin));
   }
 
-  const raw = new URL(request.url).searchParams.get('purpose');
   const purpose: ConnectPurpose | null = raw === 'inbox' || raw === 'publish' ? raw : null;
   if (purpose && !pageConnectEnabled(purpose)) {
     return NextResponse.redirect(new URL(purpose === 'inbox' ? '/?tab=inbox&fb=inbox_off' : '/?tab=pages&fb=publish_off', origin));

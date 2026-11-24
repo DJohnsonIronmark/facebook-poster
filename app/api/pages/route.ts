@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, filterByPage, noPageAccess, requireScopedUser, visiblePageIds } from '@/lib/access';
 import { requireAuth, requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { UUID_RE } from '@/lib/review/guards';
@@ -133,16 +134,18 @@ function cleanPage(raw: any): PageInput | string {
 
 // GET - all pages (signed-in users)
 export async function GET() {
-  const { error: authError } = await requireAuth();
-  if (authError) return authError;
+  const auth = await requireScopedUser();
+  if (auth.error) return auth.error;
 
-  const supabase = createServiceClient();
+  const supabase = auth.supabase;
   const { data, error } = await supabase.from('facebook_pages').select(PAGE_COLUMNS).order('location_name');
   if (error) {
     console.error('pages GET', error);
     return NextResponse.json({ error: 'Failed to fetch pages' }, { status: 500 });
   }
-  return NextResponse.json({ pages: await attachConnectionInfo(supabase, (data || []) as SocialPageFields[]) });
+  // Only the pages this user can access on Facebook (admins: all)
+  const visible = filterByPage(auth.scope, (data || []) as SocialPageFields[]);
+  return NextResponse.json({ pages: await attachConnectionInfo(supabase, visible) });
 }
 
 // POST - add pages, manually or imported from Facebook (admin/manager)
@@ -225,6 +228,9 @@ export async function PATCH(request: NextRequest) {
   const supabase = createServiceClient();
   const { data: current } = await supabase.from('facebook_pages').select('facebook_page_id').eq('id', id).maybeSingle();
   if (!current) return NextResponse.json({ error: 'Page not found' }, { status: 404 });
+  const scoped = await requireScopedUser();
+  if (scoped.error) return scoped.error;
+  if (!canSeePage(scoped.scope, String(current.facebook_page_id))) return noPageAccess();
 
   const update: Record<string, unknown> = {};
   if (hasDetails) {

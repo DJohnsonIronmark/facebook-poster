@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { canSeePage, noPageAccess, requireScopedUser } from '@/lib/access';
 import { requireRole } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { GraphError, inboxEnabled, performInboxAction, type InboxAction } from '@/lib/inbox/server';
@@ -26,6 +27,11 @@ export async function POST(request: NextRequest) {
   const action = body?.action as Action;
 
   if (!FB_PAGE_ID_RE.test(pageId)) return NextResponse.json({ error: 'Invalid page' }, { status: 400 });
+  {
+    const scoped = await requireScopedUser(['admin', 'manager']);
+    if (scoped.error) return scoped.error;
+    if (!canSeePage(scoped.scope, pageId)) return noPageAccess();
+  }
   if (platform !== 'facebook' && platform !== 'instagram') return NextResponse.json({ error: 'Invalid platform' }, { status: 400 });
   if (kind !== 'comment' && kind !== 'message') return NextResponse.json({ error: 'Invalid item type' }, { status: 400 });
   if (!GRAPH_ID_RE.test(externalId)) return NextResponse.json({ error: 'Invalid item' }, { status: 400 });
