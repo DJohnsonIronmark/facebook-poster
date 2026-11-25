@@ -46,7 +46,10 @@ export async function middleware(request: NextRequest) {
     // Client review pages: authenticated by the magic-link token, not a login
     request.nextUrl.pathname.startsWith('/review/') ||
     // Instagram link in bio pages: public by design (only published posts of enabled pages)
-    request.nextUrl.pathname.startsWith('/l/');
+    request.nextUrl.pathname.startsWith('/l/') ||
+    // Privacy notice + data deletion instructions: must be public (Meta app review, platform terms)
+    request.nextUrl.pathname === '/privacy' ||
+    request.nextUrl.pathname === '/data-deletion';
 
   // If no user and trying to access protected routes, redirect to login
   if (!user && !isPublicRoute) {
