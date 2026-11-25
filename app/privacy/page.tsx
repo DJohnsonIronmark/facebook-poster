@@ -2,8 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 // Public privacy notice for the Ironmark Social Publisher (facebook-poster). Required for Meta App
-// Review / Platform Terms. DRAFT: items marked [TO CONFIRM] need Ironmark legal/compliance sign-off
-// before this is used in an app review submission.
+// Review / Platform Terms.
 
 export const metadata: Metadata = {
   title: 'Privacy Notice – Ironmark Social Publisher',
@@ -13,17 +12,9 @@ export const metadata: Metadata = {
 const LAST_UPDATED = 'November 24, 2026';
 const CONTACT_EMAIL = 'websupport@ironmarkusa.com';
 
-function ToConfirm({ children }: { children: React.ReactNode }) {
-  return <span className="bg-amber-100 text-amber-900 px-1 rounded font-medium">[TO CONFIRM: {children}]</span>;
-}
-
 export default function PrivacyPage() {
   return (
     <main className="max-w-3xl mx-auto px-6 py-12 text-gray-800">
-      <div className="mb-8 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-        Draft – pending review by Ironmark. Items marked &ldquo;TO CONFIRM&rdquo; are not final.
-      </div>
-
       <h1 className="text-3xl font-bold text-gray-900">Privacy Notice – Ironmark Social Publisher</h1>
       <p className="mt-2 text-sm text-gray-500">Last updated: {LAST_UPDATED}</p>
 
@@ -92,7 +83,7 @@ export default function PrivacyPage() {
           profiles of individuals.</strong></li>
         <li>We do not share this data with third parties, except the service providers that host and run the Publisher on our behalf
           (Vercel for hosting, Supabase for the database), under contracts that restrict their use of it, or where required by law.</li>
-        <li>Our AI tools are not used on this data. <ToConfirm>update this line if AI-drafted posts are added</ToConfirm></li>
+        <li>The Publisher does not use this data with AI tools today. If that changes, we will update this notice before it does.</li>
       </ul>
 
       <h2 className="mt-10 text-xl font-semibold text-gray-900">Storage and security</h2>
@@ -100,14 +91,15 @@ export default function PrivacyPage() {
         <li>Access tokens are encrypted (AES-256-GCM) before they are stored. The encryption key is held separately from the database.</li>
         <li>The database is only accessible to the Publisher&apos;s servers. It is not reachable with public credentials, and staff
           access is limited to authorized people.</li>
-        <li>Data is stored in the United States. <ToConfirm>hosting regions</ToConfirm></li>
+        <li>Data is stored in the United States.</li>
       </ul>
 
       <h2 className="mt-10 text-xl font-semibold text-gray-900">How long we keep data</h2>
       <ul className="mt-3 list-disc pl-6 space-y-1">
         <li>Access tokens: until the page or account is disconnected, the token expires, or the person&apos;s access is removed.</li>
         <li>The list of pages a person manages: re-checked daily, and removed if their Facebook login expires or is revoked.</li>
-        <li>Posts and their statistics: <ToConfirm>retention period, e.g. for the length of the client relationship plus N months</ToConfirm></li>
+        <li>Posts and their statistics: for as long as needed to provide the service to Ironmark and the client the page belongs to.
+          They are deleted on request (see below) or when the client relationship ends.</li>
       </ul>
 
       <h2 className="mt-10 text-xl font-semibold text-gray-900">Your choices and deletion</h2>

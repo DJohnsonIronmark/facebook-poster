@@ -2,8 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 // Public data deletion instructions for the Ironmark Social Publisher (facebook-poster). Required
-// for apps using Facebook Login (Meta Platform Terms). DRAFT: items marked [TO CONFIRM] need Ironmark
-// legal/compliance sign-off before this is used in an app review submission.
+// for apps using Facebook Login (Meta Platform Terms).
 
 export const metadata: Metadata = {
   title: 'Data Deletion – Ironmark Social Publisher',
@@ -12,17 +11,9 @@ export const metadata: Metadata = {
 
 const CONTACT_EMAIL = 'websupport@ironmarkusa.com';
 
-function ToConfirm({ children }: { children: React.ReactNode }) {
-  return <span className="bg-amber-100 text-amber-900 px-1 rounded font-medium">[TO CONFIRM: {children}]</span>;
-}
-
 export default function DataDeletionPage() {
   return (
     <main className="max-w-3xl mx-auto px-6 py-12 text-gray-800">
-      <div className="mb-8 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-        Draft – pending review by Ironmark. Items marked &ldquo;TO CONFIRM&rdquo; are not final.
-      </div>
-
       <h1 className="text-3xl font-bold text-gray-900">Data Deletion Instructions – Ironmark Social Publisher</h1>
       <p className="mt-4">
         You can remove the Ironmark Social Publisher&apos;s access to your Facebook account, Pages and Instagram accounts at any time,
@@ -34,7 +25,7 @@ export default function DataDeletionPage() {
       <ol className="mt-3 list-decimal pl-6 space-y-1">
         <li>On Facebook, open <strong>Settings &amp; privacy → Settings</strong>.</li>
         <li>Go to <strong>Business integrations</strong> (or <strong>Apps and websites</strong>).</li>
-        <li>Find <strong>Ironmark Social Publisher</strong> <ToConfirm>the Meta app&apos;s display name</ToConfirm>, choose <strong>Remove</strong>, and confirm.</li>
+        <li>Find the Ironmark app you used to connect your Pages, choose <strong>Remove</strong>, and confirm.</li>
       </ol>
       <p className="mt-2 text-sm text-gray-600">
         This stops the Publisher from accessing your account, Pages and linked Instagram accounts. Stored tokens stop working
@@ -55,10 +46,10 @@ export default function DataDeletionPage() {
         <li>Stored access tokens for your Facebook account, Pages and Instagram accounts.</li>
         <li>The record of which Pages you manage.</li>
         <li>Posts, statistics and link in bio settings we hold for those Pages and accounts, unless we must keep them to meet a legal
-          obligation or a contract with the client that owns the Page. <ToConfirm>retention exceptions</ToConfirm></li>
+          obligation or a contract with the client that owns the Page.</li>
       </ul>
       <p className="mt-3">
-        We will confirm by email when the deletion is complete, within <ToConfirm>e.g. 30 days</ToConfirm> of verifying your request.
+        We will confirm by email when the deletion is complete, within 30 days of verifying your request.
         Posts already published to Facebook or Instagram stay on those platforms; you can delete them there.
       </p>
 
