@@ -45,7 +45,8 @@ export default function AccessBanner() {
       </div>
     );
   }
-  if (!me || me.role === 'admin') return null;
+  // Role-based security only until PAGE_ACCESS_ENFORCED is on (Meta Advanced Access pending): no prompt yet
+  if (!me || me.role === 'admin' || !me.enforced) return null;
 
   const expired = me.facebook.status === 'needs_reauth';
   if (me.facebook.verified && !expired) return null;
